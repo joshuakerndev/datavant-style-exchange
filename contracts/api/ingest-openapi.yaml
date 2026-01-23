@@ -1,0 +1,132 @@
+openapi: 3.0.3
+info:
+  title: Datavant-Style Exchange - Ingest API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+  /v1/ingest:
+    post:
+      summary: Ingest a partner record (v1)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8 }
+        - name: X-Correlation-Id
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartnerRecordV1"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestAccepted"
+        "400":
+          description: Invalid payload
+        "401":
+          description: Unauthorized
+        "409":
+          description: Idempotency conflict
+  /v2/ingest:
+    post:
+      summary: Ingest a partner record (v2)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8 }
+        - name: X-Correlation-Id
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartnerRecordV2"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestAccepted"
+        "400":
+          description: Invalid payload
+        "401":
+          description: Unauthorized
+        "409":
+          description: Idempotency conflict
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    PartnerRecordV1:
+      type: object
+      additionalProperties: false
+      required: [source, record_type, patient, payload]
+      properties:
+        source: { type: string }
+        record_type: { type: string, enum: [encounter] }
+        patient:
+          type: object
+          additionalProperties: false
+          required: [first_name, last_name, dob]
+          properties:
+            first_name: { type: string }
+            last_name: { type: string }
+            dob: { type: string, format: date }
+            ssn: { type: string, nullable: true }
+        payload:
+          type: object
+          description: Partner-specific record payload
+    PartnerRecordV2:
+      type: object
+      additionalProperties: false
+      required: [source, record_kind, schema_hint, patient, payload]
+      properties:
+        source: { type: string }
+        record_kind: { type: string, enum: [encounter, claim, lab_result] }
+        schema_hint: { type: string, enum: [partnerA.v1, partnerA.v2, partnerB.v1] }
+        patient:
+          type: object
+          additionalProperties: false
+          required: [given_name, family_name, dob]
+          properties:
+            given_name: { type: string }
+            family_name: { type: string }
+            dob: { type: string, format: date }
+            ssn: { type: string, nullable: true }
+        payload:
+          type: object
+          description: Partner-specific record payload
+    IngestAccepted:
+      type: object
+      additionalProperties: false
+      required: [record_id, correlation_id]
+      properties:
+        record_id: { type: string, format: uuid }
+        correlation_id: { type: string }

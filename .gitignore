@@ -1,0 +1,26 @@
+# OS
+.DS_Store
+
+# env
+.env
+
+# logs
+*.log
+
+# node
+node_modules/
+.next/
+dist/
+
+# python
+__pycache__/
+.venv/
+*.pyc
+
+# go
+bin/
+*.exe
+*.test
+
+# misc
+coverage/

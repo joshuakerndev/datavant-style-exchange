@@ -1,0 +1,21 @@
+schema {
+  query: Query
+}
+
+type Query {
+  patient(patientToken: ID!): Patient
+  encounters(patientToken: ID!): [Encounter!]!
+}
+
+type Patient {
+  patientToken: ID!
+  dob: String
+}
+
+type Encounter {
+  encounterId: ID!
+  patientToken: ID!
+  facilityId: String
+  admitTime: String
+  dischargeTime: String
+}

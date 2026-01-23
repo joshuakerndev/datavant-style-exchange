@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/events/v2.record_ingested.json",
+  "title": "record.ingested.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_version", "event_type", "event_id", "occurred_at", "correlation_id", "source", "record_id", "record_kind", "schema_hint", "raw_object"],
+  "properties": {
+    "event_version": { "type": "string", "const": "2" },
+    "event_type": { "type": "string", "const": "record.ingested" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "correlation_id": { "type": "string", "minLength": 8 },
+    "source": { "type": "string", "minLength": 1 },
+    "record_id": { "type": "string", "format": "uuid" },
+    "record_kind": { "type": "string", "enum": ["encounter", "claim", "lab_result"] },
+    "schema_hint": { "type": "string", "enum": ["partnerA.v1", "partnerA.v2", "partnerB.v1"] },
+    "raw_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bucket", "key", "sha256", "size_bytes"],
+      "properties": {
+        "bucket": { "type": "string" },
+        "key": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

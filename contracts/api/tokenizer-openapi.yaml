@@ -1,0 +1,54 @@
+openapi: 3.0.3
+info:
+  title: Datavant-Style Exchange - Tokenizer
+  version: 0.1.0
+servers:
+  - url: http://localhost:8081
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        "200": { description: OK }
+  /tokenize:
+    post:
+      summary: Tokenize patient identifiers (deterministic)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenizeRequest"
+      responses:
+        "200":
+          description: Tokenized identifiers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenizeResponse"
+        "400": { description: Invalid payload }
+        "401": { description: Unauthorized }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    TokenizeRequest:
+      type: object
+      additionalProperties: false
+      required: [given_name, family_name, dob]
+      properties:
+        given_name: { type: string }
+        family_name: { type: string }
+        dob: { type: string, format: date }
+        ssn: { type: string, nullable: true }
+    TokenizeResponse:
+      type: object
+      additionalProperties: false
+      required: [patient_token]
+      properties:
+        patient_token: { type: string, minLength: 16 }
