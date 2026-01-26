@@ -19,6 +19,7 @@ import (
 
 	"datavant-style-exchange/services/ingest-api-go/internal/config"
 	"datavant-style-exchange/services/ingest-api-go/internal/httpapi"
+	"datavant-style-exchange/services/ingest-api-go/internal/metrics"
 	"datavant-style-exchange/services/ingest-api-go/internal/outbox"
 )
 
@@ -72,6 +73,7 @@ func main() {
 	router := chi.NewRouter()
 
 	router.Get("/healthz", handler.Healthz)
+	router.Handle("/metrics", metrics.Handler(db))
 	router.Route("/v1", func(r chi.Router) {
 		r.Use(httpapi.AuthMiddleware(cfg))
 		r.Post("/ingest", handler.IngestV1)
@@ -85,7 +87,9 @@ func main() {
 		IdleTimeout:  idleTimeout,
 	}
 
-	outboxPublisher := outbox.NewPublisher(db, kafkaWriter, logger)
+	outboxPublisher := outbox.NewPublisher(db, kafkaWriter, logger, func() {
+		metrics.OutboxPublishFailures.Inc()
+	})
 	publisherCtx, publisherCancel := context.WithCancel(context.Background())
 	var publisherWG sync.WaitGroup
 	publisherWG.Add(1)

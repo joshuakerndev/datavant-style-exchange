@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ import (
 
 	"datavant-style-exchange/services/ingest-api-go/internal/config"
 	"datavant-style-exchange/services/ingest-api-go/internal/ingest"
+	"datavant-style-exchange/services/ingest-api-go/internal/metrics"
 )
 
 const (
@@ -58,6 +60,7 @@ func (h *Handler) Healthz(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	if len(idempotencyKey) < minIdempotency {
+		h.recordIngestStatus(http.StatusBadRequest)
 		h.respondError(w, http.StatusBadRequest, "missing or invalid Idempotency-Key")
 		return
 	}
@@ -71,6 +74,7 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 	defer bodyReader.Close()
 	body, err := io.ReadAll(bodyReader)
 	if err != nil {
+		h.recordIngestStatus(http.StatusBadRequest)
 		h.respondError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
@@ -81,6 +85,7 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		h.logger.Error("failed to open transaction", "error", err)
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to process request")
 		return
 	}
@@ -90,6 +95,7 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.lockIdempotencyKey(r.Context(), tx, idempotencyKey); err != nil {
 		h.logger.Error("failed to lock idempotency key", "error", err)
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to process request")
 		return
 	}
@@ -97,24 +103,29 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 	idempotentResponse, conflict, err := h.checkIdempotencyTx(r.Context(), tx, idempotencyKey, shaHex)
 	if err != nil {
 		h.logger.Error("failed to check idempotency", "error", err)
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to process request")
 		return
 	}
 	if conflict {
+		h.recordIngestStatus(http.StatusConflict)
 		h.respondError(w, http.StatusConflict, "idempotency conflict")
 		return
 	}
 	if idempotentResponse != nil {
+		h.recordIngestStatus(http.StatusAccepted)
 		writeJSONBytes(w, http.StatusAccepted, idempotentResponse)
 		return
 	}
 
 	var record ingest.PartnerRecordV1
 	if err := json.Unmarshal(body, &record); err != nil {
+		h.recordIngestStatus(http.StatusBadRequest)
 		h.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
 	if validationErr := validateRecord(record); validationErr != nil {
+		h.recordIngestStatus(http.StatusBadRequest)
 		h.respondError(w, http.StatusBadRequest, validationErr.Error())
 		return
 	}
@@ -124,6 +135,7 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.writeRawObject(r.Context(), key, body); err != nil {
 		h.logger.Error("failed to write raw object", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to persist raw object")
 		return
 	}
@@ -131,6 +143,7 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 	response := ingest.IngestAccepted{RecordID: recordID, CorrelationID: correlationID}
 	responseBytes, err := json.Marshal(response)
 	if err != nil {
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to build response")
 		return
 	}
@@ -138,24 +151,28 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 	event := buildRecordIngestedEvent(record, recordID, correlationID, h.cfg.RawBucket, key, shaHex, int64(len(body)))
 	eventBytes, err := json.Marshal(event)
 	if err != nil {
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to build event")
 		return
 	}
 
 	if err := h.insertOutboxEventTx(r.Context(), tx, h.cfg.TopicRecordIngestedV1, recordID, eventBytes); err != nil {
 		h.logger.Error("failed to persist outbox event", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to persist outbox event")
 		return
 	}
 
 	if err := h.storeIdempotencyTx(r.Context(), tx, idempotencyKey, shaHex, responseBytes); err != nil {
 		h.logger.Error("failed to store idempotency", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to persist idempotency")
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.logger.Error("failed to commit ingest transaction", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to process request")
 		return
 	}
@@ -166,6 +183,7 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 		"source", record.Source,
 		"size_bytes", len(body),
 	)
+	h.recordIngestStatus(http.StatusAccepted)
 	writeJSONBytes(w, http.StatusAccepted, responseBytes)
 }
 
@@ -242,6 +260,10 @@ func writeJSONBytes(w http.ResponseWriter, status int, payload []byte) {
 func (h *Handler) respondError(w http.ResponseWriter, status int, message string) {
 	response := map[string]string{"error": message}
 	writeJSON(w, status, response)
+}
+
+func (h *Handler) recordIngestStatus(status int) {
+	metrics.IngestRequests.WithLabelValues("/v1/ingest", strconv.Itoa(status)).Inc()
 }
 
 func (h *Handler) lockIdempotencyKey(ctx context.Context, tx *sql.Tx, key string) error {

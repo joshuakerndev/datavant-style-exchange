@@ -17,18 +17,20 @@ const (
 )
 
 type Publisher struct {
-	db           *sql.DB
-	kafkaWriter  *kafka.Writer
-	logger       *slog.Logger
-	pollInterval time.Duration
+	db               *sql.DB
+	kafkaWriter      *kafka.Writer
+	logger           *slog.Logger
+	pollInterval     time.Duration
+	onPublishFailure func()
 }
 
-func NewPublisher(db *sql.DB, kafkaWriter *kafka.Writer, logger *slog.Logger) *Publisher {
+func NewPublisher(db *sql.DB, kafkaWriter *kafka.Writer, logger *slog.Logger, onPublishFailure func()) *Publisher {
 	return &Publisher{
-		db:           db,
-		kafkaWriter:  kafkaWriter,
-		logger:       logger,
-		pollInterval: outboxPollInterval,
+		db:               db,
+		kafkaWriter:      kafkaWriter,
+		logger:           logger,
+		pollInterval:     outboxPollInterval,
+		onPublishFailure: onPublishFailure,
 	}
 }
 
@@ -110,6 +112,9 @@ func (p *Publisher) publishBatch(ctx context.Context) error {
 		publishCancel()
 		if err != nil {
 			p.logger.Error("failed to publish outbox event", "error", err, "event_id", event.ID, "topic", event.Topic, "key", event.Key)
+			if p.onPublishFailure != nil {
+				p.onPublishFailure()
+			}
 			continue
 		}
 
