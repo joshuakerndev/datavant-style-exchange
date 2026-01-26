@@ -26,16 +26,22 @@ This is NOT a toy CRUD app.
 
 ### ingest-api-go
 - Language: Go
-- REST endpoint: `POST /v1/ingest`
-- Requires `Idempotency-Key`
-- Enforces true idempotency using Postgres:
-  - same key + same body → same response
+- REST endpoints: `GET /healthz`, `POST /v1/ingest`
+- Requires `Idempotency-Key` (min length enforced)
+- Idempotency uses Postgres `idempotency_keys`:
+  - request hash is SHA-256 of body, stored as hex
+  - same key + same body → replayed response (same `record_id`/`correlation_id`)
   - same key + different body → 409 conflict
-- Writes raw JSON payloads to S3 (MinIO)
-- Publishes `record.ingested.v1` events to Kafka (Redpanda)
-- Uses correlation IDs
+  - per-key serialization via `pg_advisory_xact_lock(hashtext(key))`
+  - idempotency response stored in the same DB transaction as the outbox insert
+- Writes raw JSON payloads to S3 (MinIO) with key format: `<source>/<record_id>.json`
+- Enqueues outbox row; publisher publishes asynchronously
+  - outbox row includes topic, key, payload (bucket/key, sha256, size, `correlation_id`)
+- Correlation ID uses `X-Correlation-Id` if acceptable, otherwise generates a UUID
 - Logs are structured and PII-safe
 - Local dev auth shortcut: `Authorization: Bearer dev` when `ENV=local`
+- Otherwise JWT validation is enforced (issuer/audience/secret)
+- Known limitation: MinIO write and DB transaction are not atomic; a crash between them can orphan a raw object
 
 ### Infrastructure
 - Docker Compose
@@ -53,31 +59,26 @@ This is NOT a toy CRUD app.
 - Avoid logging PII
 - Prefer small, composable changes
 - Favor explicit error handling
+- Do not “fix” known limitations unless explicitly instructed.
+
 
 ---
 
 ## Known next steps (planned work)
 
-### 1. Outbox pattern (high priority)
-- Insert Kafka events into `outbox_events` table instead of publishing inline
-- Background publisher marks rows as published
-- Eliminates orphaned raw objects if Kafka is unavailable
+### 1. Metrics
+- `/metrics` endpoint and Prometheus scrape config
 
-### 2. Normalizer worker (Python)
+### 2. v2 ingest + schema migration
+- Support `/v2/ingest`
+- New event schema
+- Backward compatibility
+
+### 3. Normalizer worker (Python)
 - Consume `record.ingested.v1`
 - Call tokenizer
 - Write canonical SQL tables
 - Retry + DLQ
-
-### 3. Tokenizer service
-- Deterministic HMAC-based tokenization
-- Strict auth boundary
-- No PII leaves tokenizer
-
-### 4. v2 ingest + schema migration
-- Support `/v2/ingest`
-- New event schema
-- Backward compatibility
 
 ---
 

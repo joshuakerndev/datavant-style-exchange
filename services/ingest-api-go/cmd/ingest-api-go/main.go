@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 	"datavant-style-exchange/services/ingest-api-go/internal/config"
 	"datavant-style-exchange/services/ingest-api-go/internal/httpapi"
+	"datavant-style-exchange/services/ingest-api-go/internal/outbox"
 )
 
 const (
@@ -60,7 +62,6 @@ func main() {
 
 	kafkaWriter := &kafka.Writer{
 		Addr:     kafka.TCP(cfg.KafkaBrokers...),
-		Topic:    cfg.TopicRecordIngestedV1,
 		Balancer: &kafka.LeastBytes{},
 	}
 	defer func() {
@@ -84,6 +85,15 @@ func main() {
 		IdleTimeout:  idleTimeout,
 	}
 
+	outboxPublisher := outbox.NewPublisher(db, kafkaWriter, logger)
+	publisherCtx, publisherCancel := context.WithCancel(context.Background())
+	var publisherWG sync.WaitGroup
+	publisherWG.Add(1)
+	go func() {
+		defer publisherWG.Done()
+		outboxPublisher.Run(publisherCtx)
+	}()
+
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 
@@ -96,9 +106,11 @@ func main() {
 	}()
 
 	<-shutdown
+	publisherCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
+	publisherWG.Wait()
 }

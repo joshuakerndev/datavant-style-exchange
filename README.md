@@ -34,11 +34,11 @@ This repository mirrors the real-world platform concerns described in Datavant�
 
 ### Implemented services
 - **`ingest-api-go`**
-  - REST API (`POST /v1/ingest`)
+  - REST API (`GET /healthz`, `POST /v1/ingest`)
   - Payload validation
-  - **True idempotency** via Postgres
+  - Idempotency via Postgres (see notes on current guarantees)
   - Raw object persistence to S3 (MinIO)
-  - Event publication to Kafka (Redpanda)
+  - Event publication to Kafka (Redpanda) via Postgres outbox + background publisher
   - Correlation IDs and structured logging
 
 ### Planned services
@@ -69,14 +69,15 @@ All behavior is driven by versioned contracts:
 ## Data flow
 
 ### Ingest path (online)
-1. Client calls `POST /v1/ingest` with `Idempotency-Key`
-2. API validates payload + computes request hash
+1. Client calls `POST /v1/ingest` with `Idempotency-Key` (min length enforced)
+2. API validates payload + computes request hash (SHA-256 hex)
 3. **Idempotency enforced via Postgres**
    - same key + same body → same response
    - same key + different body → 409 conflict
 4. Raw JSON written to S3 (MinIO)
-5. Event published to Kafka (`record.ingested.v1`)
-6. API returns `202 Accepted`
+5. Event written to Postgres `outbox_events` (topic/key/payload)
+6. Background publisher publishes to Kafka and marks `published_at`
+7. API returns `202 Accepted`
 
 ### Replay / backfill (planned)
 - Reprocess raw objects from S3
@@ -99,15 +100,21 @@ All behavior is driven by versioned contracts:
 
 ### Implemented
 - **Idempotent ingest API**
+- **Outbox pattern** (DB-backed queue + async publisher)
+- **Per-key idempotency serialization via Postgres advisory lock**
 - Deterministic request hashing
 - Durable raw object storage
 - Correlation IDs across logs and events
 
 ### Planned
-- **Outbox pattern** (DB → Kafka consistency)
 - Retry + backoff
 - DLQ handling + reprocessing
 - Schema versioning (v1 → v2 migration path)
+
+### Notes on current guarantees
+- Idempotency + outbox rows are persisted transactionally after MinIO write succeeds
+- Kafka downtime no longer breaks ingest; events queue in Postgres and publish later
+- Remaining limitation: MinIO and Postgres are not atomic, so a crash after MinIO write but before tx commit can orphan a raw object
 
 ---
 
@@ -116,7 +123,7 @@ All behavior is driven by versioned contracts:
 ```bash
 cp .env.example .env
 make up
-
+```
 
 Endpoints
 
@@ -153,7 +160,7 @@ Status
 
 Ingest + idempotency: complete
 
-Outbox pattern: next
+Outbox pattern: complete
 
 Normalization pipeline: planned
 
