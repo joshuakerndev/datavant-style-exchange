@@ -1,0 +1,4 @@
+confluent-kafka
+minio
+psycopg[binary]
+prometheus_client

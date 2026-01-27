@@ -40,10 +40,14 @@ This repository mirrors the real-world platform concerns described in Datavant�
   - Raw object persistence to S3 (MinIO)
   - Event publication to Kafka (Redpanda) via Postgres outbox + background publisher
   - Correlation IDs and structured logging
+- **`normalizer-worker-py`**
+  - Kafka consumer for `record.ingested.v1`
+  - Fetches raw objects from MinIO
+  - Writes canonical records idempotently to Postgres
+  - Bounded retries + DLQ publish on failure
 
 ### Planned services
 - `tokenizer-go` — deterministic PII tokenization service
-- `normalizer-worker-py` — async consumer → canonical SQL writes
 - `graphql-api-next` — read-only product-facing query layer
 
 ### Local infrastructure
@@ -104,11 +108,11 @@ All behavior is driven by versioned contracts:
 - **Per-key idempotency serialization via Postgres advisory lock**
 - Deterministic request hashing
 - Durable raw object storage
+- Bounded retries + DLQ handling (normalizer worker)
 - Correlation IDs across logs and events
 
 ### Planned
-- Retry + backoff
-- DLQ handling + reprocessing
+- Reprocessing workflows
 - Schema versioning (v1 → v2 migration path)
 
 ### Notes on current guarantees
@@ -162,6 +166,6 @@ Ingest + idempotency: complete
 
 Outbox pattern: complete
 
-Normalization pipeline: planned
+Normalization pipeline: complete
 
 Tokenization: planned

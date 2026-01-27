@@ -61,3 +61,66 @@ Kafka is restored.
 - Idempotency is serialized per `Idempotency-Key` via Postgres advisory locks.
 - MinIO writes and DB transactions are not atomic; a crash after MinIO write but before DB commit can orphan a raw object.
 - This tradeoff is intentional and documented.
+
+## Milestone 3 — Normalizer Worker
+
+This runbook validates the normalizer worker happy path, DLQ behavior, and idempotency.
+
+1) Start the stack
+   - `docker compose up -d`
+   - Confirm `normalizer-worker-py` is running with `docker compose ps`
+
+2) Ingest a record (capture `record_id`)
+   - `curl -X POST http://localhost:8080/v1/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: normalizer-demo-$(date +%s)" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "source": "demo-source",
+       "record_type": "encounter",
+       "patient": { "first_name": "Sam", "last_name": "Lee", "dob": "1990-01-01" },
+       "payload": { "example": true }
+     }'`
+   - Save the `record_id` from the response
+
+3) Verify canonical row exists
+   - `docker compose exec postgres psql -U exchange -d exchange`
+   - Query:
+   ```sql
+   SELECT record_id, source, raw_object_key, raw_sha256, ingested_at, normalized_at, correlation_id
+   FROM canonical_records
+   WHERE record_id = '<record_id>';
+   ```
+   - `ingested_at` comes from the event `occurred_at` field
+
+### Important: How to correctly trigger DLQ in this system
+
+In this architecture, the ingest API writes the raw payload to MinIO before publishing a Kafka event.
+If the raw object cannot be persisted, ingest fails and no Kafka event is emitted.
+
+- Stopping MinIO before calling `/v1/ingest` will cause ingest to fail with `failed to persist raw object`,
+  and no DLQ message will be produced.
+- This is expected behavior and an intentional tradeoff, not an error.
+
+To exercise the normalizer DLQ path, the failure must occur after the Kafka event already exists.
+
+4) Simulate failure and verify DLQ
+   - Stop the normalizer worker:
+     - `docker compose stop normalizer-worker-py`
+   - Ensure MinIO is running:
+     - `docker compose start minio`
+   - Ingest a new record (use a new Idempotency-Key)
+   - Stop MinIO:
+     - `docker compose stop minio`
+   - Restart the normalizer worker without dependencies:
+     - `docker compose up -d --no-deps normalizer-worker-py`
+   - Wait for retries to exhaust, then verify DLQ messages:
+     - `docker compose exec redpanda rpk topic consume record.ingested.v1.dlq -n 1 --brokers redpanda:9092`
+   - Confirm the DLQ envelope includes `original_event`, `error` (type, message, stage), `attempts`, and `failed_at`
+
+5) Idempotency test (no duplicate rows)
+   - Reprocess the same `record_id` (replay the same Kafka message or re-run the worker against the same event)
+   - Verify row count remains 1:
+   ```sql
+   SELECT COUNT(*) FROM canonical_records WHERE record_id = '<record_id>';
+   ```

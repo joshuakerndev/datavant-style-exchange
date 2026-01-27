@@ -33,6 +33,15 @@ services:
       timeout: 3s
       retries: 20
 
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/init.sh"]
+    volumes:
+      - ./minio/init.sh:/init.sh:ro
+
   redpanda:
     image: redpandadata/redpanda:latest
     command:
@@ -65,12 +74,9 @@ services:
     depends_on:
       redpanda:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-lc"]
-    command: >
-      rpk topic create record.ingested.v1 -p 1 -r 1 || true;
-      rpk topic create record.ingested.v2 -p 1 -r 1 || true;
-      rpk topic create record.dlq.v1 -p 1 -r 1 || true;
-      echo "topics ready";
+    entrypoint: ["/bin/sh", "/init.sh"]
+    volumes:
+      - ./redpanda/init.sh:/init.sh:ro
 
   ingest-api:
     build:
@@ -85,7 +91,34 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       redpanda:
+        condition: service_healthy
+
+  normalizer-worker-py:
+    build:
+      context: ../services/normalizer-worker-py
+    env_file:
+      - ../.env
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-redpanda:9092}
+      KAFKA_TOPIC: record.ingested.v1
+      KAFKA_DLQ_TOPIC: record.ingested.v1.dlq
+      KAFKA_GROUP_ID: normalizer.v1
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${RAW_BUCKET:-raw-objects}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://exchange:exchange@postgres:5432/exchange?sslmode=disable}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-5}
+      BACKOFF_BASE_MS: ${BACKOFF_BASE_MS:-250}
+    depends_on:
+      minio:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   prometheus:

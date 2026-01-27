@@ -43,6 +43,13 @@ This is NOT a toy CRUD app.
 - Otherwise JWT validation is enforced (issuer/audience/secret)
 - Known limitation: MinIO write and DB transaction are not atomic; a crash between them can orphan a raw object
 
+### normalizer-worker-py
+- Consumes `record.ingested.v1`
+- Fetches raw objects from MinIO
+- Writes to `canonical_records` idempotently (ON CONFLICT DO NOTHING)
+- Retries with bounded backoff; on failure publishes to `record.ingested.v1.dlq`
+- Commits Kafka offsets only after DB success (including dup) or DLQ publish success
+
 ### Infrastructure
 - Docker Compose
 - Postgres (idempotency_keys, outbox_events, audit_log tables exist)
@@ -75,10 +82,7 @@ This is NOT a toy CRUD app.
 - Backward compatibility
 
 ### 3. Normalizer worker (Python)
-- Consume `record.ingested.v1`
 - Call tokenizer
-- Write canonical SQL tables
-- Retry + DLQ
 
 ---
 
