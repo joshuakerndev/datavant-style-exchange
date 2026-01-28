@@ -56,6 +56,11 @@ This is NOT a toy CRUD app.
 - Retries with bounded backoff; on failure publishes to `record.ingested.v1.dlq`
 - Commits Kafka offsets only after DB success (including dup) or DLQ publish success
 
+### replayer-cli-py
+- Deterministic replay tool
+- Emits v1 events from raw storage
+- Verifies canonical completeness
+
 ### Infrastructure
 - Docker Compose
 - Postgres (idempotency_keys, outbox_events, audit_log tables exist)
@@ -84,9 +89,6 @@ This is NOT a toy CRUD app.
 - New event schema
 - Backward compatibility
 
-### 2. Reprocessing / backfill
-- Reprocess raw objects from S3
-- Re-emit events deterministically
 
 ---
 

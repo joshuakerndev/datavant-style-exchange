@@ -155,3 +155,45 @@ This runbook validates tokenizer determinism and confirms canonical records cont
    - Confirm `normalized` includes `patient_token` and `meta`, and does **not** include `patient` fields or raw payloads.
    - If the tokenizer is down, the normalizer will retry and then DLQ with a PII-safe envelope.
    - DLQ `error.message` is conservative (e.g., "tokenizer non-200") and never includes patient identifiers.
+
+## Milestone 5 — Reprocessing / Backfill
+
+This runbook validates deterministic replay from raw storage, canonical rebuild, and completeness verification.
+
+1) Start the stack
+   - `docker compose up -d`
+   - Confirm `ingest-api-go`, `normalizer-worker-py`, `minio`, `redpanda`, and `postgres` are healthy
+
+2) Ingest a few records (same source)
+   - Use new `Idempotency-Key` values
+   ```bash
+   curl -X POST http://localhost:8080/v1/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: replay-demo-$(date +%s)" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "source": "demo-source",
+       "record_type": "encounter",
+       "patient": { "first_name": "Sam", "last_name": "Lee", "dob": "1990-01-01" },
+       "payload": { "example": true }
+     }'
+   ```
+
+3) Drop canonical data (simulate rebuild)
+   - Stop normalizer worker:
+     - `docker compose stop normalizer-worker-py`
+   - Truncate canonical table:
+     - `docker compose exec postgres psql -U exchange -d exchange -c "TRUNCATE canonical_records;"`
+
+4) Re-emit events from raw storage
+   - `docker compose --profile tools run --rm replayer --source demo-source`
+
+5) Restart normalizer worker
+   - `docker compose start normalizer-worker-py`
+
+6) Confirm canonical rebuild
+   - `docker compose exec postgres psql -U exchange -d exchange -c "SELECT count(*) FROM canonical_records WHERE source='demo-source';"`
+
+7) Verify completeness (raw vs canonical)
+   - `docker compose --profile tools run --rm replayer --source demo-source --verify`
+   - `missing_count` should be `0`

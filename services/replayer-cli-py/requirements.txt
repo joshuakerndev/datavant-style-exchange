@@ -1,0 +1,3 @@
+confluent-kafka
+minio
+psycopg[binary]

@@ -2,7 +2,7 @@
 
 A Datavant-inspired, local-first mini platform that simulates **secure healthcare data exchange**:
 
-**REST ingest → raw storage (S3) → event streaming (Kafka) → normalization + tokenization → canonical write → (next) query**
+**REST ingest → raw storage (S3) → event streaming (Kafka) → normalization + tokenization → canonical write → replay/backfill → query**
 
 This project is intentionally scoped to demonstrate **senior/staff-level engineering judgment** rather than raw scale:
 system decomposition, idempotency, reliability, security boundaries, and operational correctness.
@@ -51,6 +51,10 @@ This repository mirrors the real-world platform concerns described in Datavant�
   - Fetches raw objects from MinIO
   - Writes canonical records idempotently to Postgres
   - Bounded retries + DLQ publish on failure
+- **`replayer-cli-py`**
+  - CLI tool for deterministic replay of raw objects from MinIO
+  - Re-emits `record.ingested.v1` events
+  - Supports completeness verification (raw vs canonical)
 
 ### Planned services
 - `graphql-api-next` — read-only product-facing query layer
@@ -58,7 +62,7 @@ This repository mirrors the real-world platform concerns described in Datavant�
 ### Local infrastructure
 - **MinIO** — S3-compatible raw object storage  
 - **Redpanda** — Kafka-compatible event streaming  
-- **Postgres** — idempotency, outbox, audit, canonical data (future)  
+- **Postgres** — idempotency, outbox, audit, canonical data  
 - **Prometheus / Grafana** — metrics & dashboards (hooked, minimal)
 
 ---
@@ -88,7 +92,7 @@ All behavior is driven by versioned contracts:
 6. Background publisher publishes to Kafka and marks `published_at`
 7. API returns `202 Accepted`
 
-### Replay / backfill (planned)
+### Replay / backfill
 - Reprocess raw objects from S3
 - Re-emit events deterministically
 - Validate canonical completeness
@@ -113,11 +117,11 @@ All behavior is driven by versioned contracts:
 - **Per-key idempotency serialization via Postgres advisory lock**
 - Deterministic request hashing
 - Durable raw object storage
+- Reprocessing workflows
 - Bounded retries + DLQ handling (normalizer worker)
 - Correlation IDs across logs and events
 
 ### Planned
-- Reprocessing workflows
 - Schema versioning (v1 → v2 migration path)
 
 ### Notes on current guarantees
@@ -174,3 +178,5 @@ Outbox pattern: complete
 Normalization pipeline: complete
 
 Tokenization: complete
+
+Reprocessing / backfill: complete
