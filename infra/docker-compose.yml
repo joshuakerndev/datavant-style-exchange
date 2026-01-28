@@ -96,6 +96,22 @@ services:
       redpanda:
         condition: service_healthy
 
+  tokenizer:
+    build:
+      context: ../services/tokenizer-go
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      TOKENIZER_ADDR: ":8081"
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8081/healthz > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   normalizer-worker-py:
     build:
       context: ../services/normalizer-worker-py
@@ -111,10 +127,13 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${RAW_BUCKET:-raw-objects}
       POSTGRES_DSN: ${POSTGRES_DSN:-postgres://exchange:exchange@postgres:5432/exchange?sslmode=disable}
+      TOKENIZER_ADDR: ${TOKENIZER_ADDR:-http://tokenizer:8081}
       MAX_ATTEMPTS: ${MAX_ATTEMPTS:-5}
       BACKOFF_BASE_MS: ${BACKOFF_BASE_MS:-250}
     depends_on:
       minio:
+        condition: service_healthy
+      tokenizer:
         condition: service_healthy
       redpanda:
         condition: service_healthy

@@ -2,7 +2,7 @@
 
 A Datavant-inspired, local-first mini platform that simulates **secure healthcare data exchange**:
 
-**REST ingest → raw storage (S3) → event streaming (Kafka) → (next) normalization + query**
+**REST ingest → raw storage (S3) → event streaming (Kafka) → normalization + tokenization → canonical write → (next) query**
 
 This project is intentionally scoped to demonstrate **senior/staff-level engineering judgment** rather than raw scale:
 system decomposition, idempotency, reliability, security boundaries, and operational correctness.
@@ -40,6 +40,12 @@ This repository mirrors the real-world platform concerns described in Datavant�
   - Raw object persistence to S3 (MinIO)
   - Event publication to Kafka (Redpanda) via Postgres outbox + background publisher
   - Correlation IDs and structured logging
+- **`tokenizer-go`**
+  - REST API (`GET /healthz`, `POST /tokenize`)
+  - Deterministic HMAC tokenization of patient identifiers
+  - Auth boundary (`Bearer dev` in `ENV=local`, otherwise JWT validation)
+  - No PII in logs
+  - Canonicalization rules documented in `docs/decisions/0001-tokenization-canonicalization.md`
 - **`normalizer-worker-py`**
   - Kafka consumer for `record.ingested.v1`
   - Fetches raw objects from MinIO
@@ -47,7 +53,6 @@ This repository mirrors the real-world platform concerns described in Datavant�
   - Bounded retries + DLQ publish on failure
 
 ### Planned services
-- `tokenizer-go` — deterministic PII tokenization service
 - `graphql-api-next` — read-only product-facing query layer
 
 ### Local infrastructure
@@ -96,7 +101,7 @@ All behavior is driven by versioned contracts:
 - **Local dev shortcut:**  
   `Authorization: Bearer dev` is accepted when `ENV=local`
 - No PII is logged
-- Tokenization will be a strict downstream boundary (planned)
+- Tokenization is a strict downstream boundary
 
 ---
 
@@ -168,4 +173,4 @@ Outbox pattern: complete
 
 Normalization pipeline: complete
 
-Tokenization: planned
+Tokenization: complete

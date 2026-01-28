@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -13,7 +14,15 @@ import psycopg
 from confluent_kafka import Consumer, KafkaException, Producer
 from minio import Minio
 from psycopg.types.json import Json
-from urllib3 import PoolManager
+from urllib3 import PoolManager, Timeout
+
+
+class TokenizerNon200Error(RuntimeError):
+    pass
+
+
+class MissingPatientIdentifiersError(ValueError):
+    pass
 
 
 def get_env(name: str, default: str | None = None) -> str:
@@ -33,13 +42,61 @@ def fetch_raw_object(client: Minio, bucket: str, key: str) -> bytes:
         response.release_conn()
 
 
-def normalize(raw: bytes) -> Dict[str, Any]:
+def normalize(
+    raw: bytes,
+    http: PoolManager,
+    tokenizer_addr: str,
+    auth_header: Optional[str],
+) -> Dict[str, Any]:
     """Normalize raw payload to canonical JSON."""
     raw_json = json.loads(raw.decode("utf-8"))
+    patient = raw_json.get("patient") or {}
+    given_name = patient.get("first_name")
+    family_name = patient.get("last_name")
+    dob = patient.get("dob")
+    ssn = patient.get("ssn")
+
+    if not given_name or not family_name or not dob:
+        raise MissingPatientIdentifiersError("missing patient identifiers")
+
+    payload: Dict[str, Any] = {
+        "given_name": given_name,
+        "family_name": family_name,
+        "dob": dob,
+    }
+    if ssn:
+        payload["ssn"] = ssn
+
+    patient_token = call_tokenizer(http, tokenizer_addr, payload, auth_header)
     return {
-        "raw": raw_json,
+        "patient_token": patient_token,
         "meta": {"normalized_at": datetime.now(timezone.utc).isoformat()},
     }
+
+
+def call_tokenizer(
+    http: PoolManager,
+    tokenizer_addr: str,
+    payload: Dict[str, Any],
+    auth_header: Optional[str],
+) -> str:
+    headers = {"Content-Type": "application/json"}
+    if auth_header:
+        headers["Authorization"] = auth_header
+
+    response = http.request(
+        "POST",
+        f"{tokenizer_addr.rstrip('/')}/tokenize",
+        body=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+    )
+    if response.status != 200:
+        raise TokenizerNon200Error("tokenizer non-200")
+    body = json.loads(response.data.decode("utf-8"))
+    token = body.get("patient_token")
+    if not token:
+        raise ValueError("missing patient_token in tokenizer response")
+    return token
 
 
 def write_canonical(conn: psycopg.Connection, record: Dict[str, Any]) -> str:
@@ -104,6 +161,18 @@ def publish_dlq(producer: Producer, topic: str, payload: Dict[str, Any]) -> None
         raise delivery_error
 
 
+def sha256_hex(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def safe_error_message(exc: Exception) -> str:
+    if isinstance(exc, MissingPatientIdentifiersError):
+        return "missing patient identifiers"
+    if isinstance(exc, TokenizerNon200Error):
+        return "tokenizer non-200"
+    return "processing error"
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -120,6 +189,9 @@ def main() -> int:
     minio_secret_key = get_env("MINIO_SECRET_KEY")
     minio_bucket = get_env("MINIO_BUCKET")
     postgres_dsn = get_env("POSTGRES_DSN")
+    env = os.getenv("ENV", "local")
+    tokenizer_addr = os.getenv("TOKENIZER_ADDR", "http://tokenizer:8081")
+    tokenizer_auth_token = os.getenv("TOKENIZER_AUTH_TOKEN")
 
     max_attempts = int(get_env("MAX_ATTEMPTS", "5"))
     backoff_base_ms = int(get_env("BACKOFF_BASE_MS", "250"))
@@ -139,6 +211,7 @@ def main() -> int:
 
     parsed_endpoint = urlparse(minio_endpoint)
     http_client = PoolManager(retries=0)
+    tokenizer_http = PoolManager(retries=0, timeout=Timeout(connect=2.0, read=5.0))
     minio_client = Minio(
         parsed_endpoint.netloc or parsed_endpoint.path,
         access_key=minio_access_key,
@@ -146,6 +219,12 @@ def main() -> int:
         secure=parsed_endpoint.scheme == "https",
         http_client=http_client,
     )
+    if env == "local":
+        tokenizer_auth = "Bearer dev"
+    else:
+        if not tokenizer_auth_token:
+            raise RuntimeError("Missing required env var: TOKENIZER_AUTH_TOKEN")
+        tokenizer_auth = f"Bearer {tokenizer_auth_token}"
 
     running = True
 
@@ -213,7 +292,7 @@ def main() -> int:
                     stage = "fetch_raw_object"
                     raw = fetch_raw_object(minio_client, raw_bucket, raw_object_key)
                     stage = "normalize"
-                    normalized = normalize(raw)
+                    normalized = normalize(raw, tokenizer_http, tokenizer_addr, tokenizer_auth)
 
                     stage = "write_canonical"
                     try:
@@ -271,12 +350,15 @@ def main() -> int:
                                 producer,
                                 kafka_dlq_topic,
                                 {
-                                    "original_event": event or {
-                                        "raw": msg.value().decode("utf-8", errors="replace")
+                                    "original_event": event
+                                    or {
+                                        "unparseable_event": True,
+                                        "event_sha256": sha256_hex(msg.value() or b""),
+                                        "size_bytes": len(msg.value() or b""),
                                     },
                                     "error": {
                                         "type": err_type,
-                                        "message": str(exc),
+                                        "message": safe_error_message(exc),
                                         "stage": stage,
                                     },
                                     "attempts": attempt,

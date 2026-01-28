@@ -124,3 +124,34 @@ To exercise the normalizer DLQ path, the failure must occur after the Kafka even
    ```sql
    SELECT COUNT(*) FROM canonical_records WHERE record_id = '<record_id>';
    ```
+
+## Milestone 4 — Tokenizer Boundary
+
+This runbook validates tokenizer determinism and confirms canonical records contain tokens only.
+
+1) Start the stack
+   - `docker compose up -d`
+   - Confirm `tokenizer` and `normalizer-worker-py` are running with `docker compose ps`
+
+2) Verify tokenizer determinism
+   - Call `/tokenize` twice with the same identifiers:
+   ```bash
+   curl -X POST http://localhost:8081/tokenize \
+     -H "Authorization: Bearer dev" \
+     -H "Content-Type: application/json" \
+     -d '{"given_name":"Sam","family_name":"Lee","dob":"1990-01-01","ssn":"123-45-6789"}'
+   ```
+   - Repeat the same request; confirm `patient_token` is identical.
+   - Change a single field (e.g., `dob`) and confirm `patient_token` changes.
+
+3) Confirm canonical records contain tokens, not PII
+   - Ingest a record as in Milestone 3 and capture the `record_id`
+   - Query the canonical row:
+   ```sql
+   SELECT record_id, normalized
+   FROM canonical_records
+   WHERE record_id = '<record_id>';
+   ```
+   - Confirm `normalized` includes `patient_token` and `meta`, and does **not** include `patient` fields or raw payloads.
+   - If the tokenizer is down, the normalizer will retry and then DLQ with a PII-safe envelope.
+   - DLQ `error.message` is conservative (e.g., "tokenizer non-200") and never includes patient identifiers.

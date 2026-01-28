@@ -43,6 +43,12 @@ This is NOT a toy CRUD app.
 - Otherwise JWT validation is enforced (issuer/audience/secret)
 - Known limitation: MinIO write and DB transaction are not atomic; a crash between them can orphan a raw object
 
+### tokenizer-go
+- REST endpoints: `GET /healthz`, `POST /tokenize`
+- Deterministic HMAC-SHA256 tokenization
+- Auth boundary mirrors ingest (local dev shortcut; otherwise JWT)
+- No PII in logs
+
 ### normalizer-worker-py
 - Consumes `record.ingested.v1`
 - Fetches raw objects from MinIO
@@ -73,16 +79,14 @@ This is NOT a toy CRUD app.
 
 ## Known next steps (planned work)
 
-### 1. Metrics
-- `/metrics` endpoint and Prometheus scrape config
-
-### 2. v2 ingest + schema migration
+### 1. v2 ingest + schema migration
 - Support `/v2/ingest`
 - New event schema
 - Backward compatibility
 
-### 3. Normalizer worker (Python)
-- Call tokenizer
+### 2. Reprocessing / backfill
+- Reprocess raw objects from S3
+- Re-emit events deterministically
 
 ---
 
