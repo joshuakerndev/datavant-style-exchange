@@ -4,14 +4,14 @@ A Datavant-inspired, local-first mini platform that simulates **secure healthcar
 
 **REST ingest → raw storage (S3) → event streaming (Kafka) → normalization + tokenization → canonical write → replay/backfill → query**
 
-This project is intentionally scoped to demonstrate **senior/staff-level engineering judgment** rather than raw scale:
+This project is intentionally scoped to demonstrate **engineering judgment** rather than raw scale:
 system decomposition, idempotency, reliability, security boundaries, and operational correctness.
 
 ---
 
-## Why this exists (aligned to the Datavant Senior SWE role)
+## Why this exists
 
-This repository mirrors the real-world platform concerns described in Datavant’s Senior Software Engineer role:
+This repository mirrors the real-world platform concerns:
 
 - **Architectural ownership & end-to-end delivery**  
   One engineer owns request lifecycle from API → storage → messaging → durability.
