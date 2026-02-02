@@ -122,7 +122,7 @@ All behavior is driven by versioned contracts:
 - Correlation IDs across logs and events
 
 ### Planned
-- Schema versioning (v1 → v2 migration path)
+- See "Planned milestones" below
 
 ### Notes on current guarantees
 - Idempotency + outbox rows are persisted transactionally after MinIO write succeeds
@@ -180,3 +180,20 @@ Normalization pipeline: complete
 Tokenization: complete
 
 Reprocessing / backfill: complete
+
+## Next milestones (planned)
+
+The core data exchange platform is complete. The next phase focuses on **schema evolution and Python/SQL-heavy data processing**, aligned with real-world data platform needs.
+
+Planned milestones:
+
+- **Schema evolution (v2 ingest)**
+  - Introduce `/v2/ingest` with a versioned event schema
+  - Dual-version event handling in downstream consumers
+  - Backward compatibility and replay support across versions
+
+- **Derived analytics / data processing (Python + SQL)**
+  - Batch-oriented Python jobs that read from canonical records
+  - Materialize derived tables using explicit SQL (aggregations, window functions)
+  - Idempotent, verifiable backfills and data quality checks
+  - Designed to simulate downstream analytics or interoperability pipelines
