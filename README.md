@@ -34,7 +34,7 @@ This repository mirrors the real-world platform concerns:
 
 ### Implemented services
 - **`ingest-api-go`**
-  - REST API (`GET /healthz`, `POST /v1/ingest`)
+  - REST API (`GET /healthz`, `POST /v1/ingest`, `POST /v2/ingest`)
   - Payload validation
   - Idempotency via Postgres (see notes on current guarantees)
   - Raw object persistence to S3 (MinIO)
@@ -47,13 +47,14 @@ This repository mirrors the real-world platform concerns:
   - No PII in logs
   - Canonicalization rules documented in `docs/decisions/0001-tokenization-canonicalization.md`
 - **`normalizer-worker-py`**
-  - Kafka consumer for `record.ingested.v1`
+  - Kafka consumer for `record.ingested.v1` and `record.ingested.v2`
   - Fetches raw objects from MinIO
   - Writes canonical records idempotently to Postgres
-  - Bounded retries + DLQ publish on failure
+  - Bounded retries + DLQ publish on failure (versioned DLQs: `record.ingested.v1.dlq`, `record.ingested.v2.dlq`)
 - **`replayer-cli-py`**
   - CLI tool for deterministic replay of raw objects from MinIO
-  - Re-emits `record.ingested.v1` events
+  - Re-emits `record.ingested` events with `--emit-version {v1,v2,auto}`
+  - Supports deterministic replay on mixed raw buckets
   - Supports completeness verification (raw vs canonical)
 
 ### Planned services
@@ -82,14 +83,14 @@ All behavior is driven by versioned contracts:
 ## Data flow
 
 ### Ingest path (online)
-1. Client calls `POST /v1/ingest` with `Idempotency-Key` (min length enforced)
+1. Client calls `POST /v1/ingest` or `POST /v2/ingest` with `Idempotency-Key` (min length enforced)
 2. API validates payload + computes request hash (SHA-256 hex)
 3. **Idempotency enforced via Postgres**
    - same key + same body → same response
    - same key + different body → 409 conflict
 4. Raw JSON written to S3 (MinIO)
 5. Event written to Postgres `outbox_events` (topic/key/payload)
-6. Background publisher publishes to Kafka and marks `published_at`
+6. Background publisher publishes versioned schemas to Kafka and marks `published_at`
 7. API returns `202 Accepted`
 
 ### Replay / backfill
@@ -181,16 +182,13 @@ Tokenization: complete
 
 Reprocessing / backfill: complete
 
+Schema evolution (v2 ingest): complete
+
 ## Next milestones (planned)
 
-The core data exchange platform is complete. The next phase focuses on **schema evolution and Python/SQL-heavy data processing**, aligned with real-world data platform needs.
+The core data exchange platform is complete. The next phase focuses on **Python/SQL-heavy data processing**, aligned with real-world data platform needs.
 
 Planned milestones:
-
-- **Schema evolution (v2 ingest)**
-  - Introduce `/v2/ingest` with a versioned event schema
-  - Dual-version event handling in downstream consumers
-  - Backward compatibility and replay support across versions
 
 - **Derived analytics / data processing (Python + SQL)**
   - Batch-oriented Python jobs that read from canonical records

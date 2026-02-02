@@ -119,8 +119,11 @@ services:
       - ../.env
     environment:
       KAFKA_BROKERS: ${KAFKA_BROKERS:-redpanda:9092}
+      KAFKA_TOPICS: record.ingested.v1,record.ingested.v2
       KAFKA_TOPIC: record.ingested.v1
       KAFKA_DLQ_TOPIC: record.ingested.v1.dlq
+      KAFKA_DLQ_TOPIC_V1: record.ingested.v1.dlq
+      KAFKA_DLQ_TOPIC_V2: record.ingested.v2.dlq
       KAFKA_GROUP_ID: normalizer.v1
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}

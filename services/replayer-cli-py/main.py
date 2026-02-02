@@ -14,7 +14,8 @@ import psycopg
 from confluent_kafka import Producer
 from minio import Minio
 
-DEFAULT_TOPIC = "record.ingested.v1"
+DEFAULT_TOPIC_V1 = "record.ingested.v1"
+DEFAULT_TOPIC_V2 = "record.ingested.v2"
 MISSING_LIMIT = 20
 STREAM_CHUNK_BYTES = 32 * 1024
 
@@ -76,8 +77,37 @@ def sha256_and_size(client: Minio, bucket: str, key: str) -> Tuple[str, int]:
     return hasher.hexdigest(), int(stat.size)
 
 
+def fetch_raw_object(client: Minio, bucket: str, key: str) -> bytes:
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def correlation_id_for(record_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, record_id))
+
+
+def sha256_hex_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def infer_emit_version(raw_json: dict) -> str:
+    patient = raw_json.get("patient") or {}
+    has_v2 = (
+        raw_json.get("record_kind")
+        and raw_json.get("schema_hint")
+        and patient.get("given_name")
+        and patient.get("family_name")
+    )
+    if has_v2:
+        return "v2"
+    has_v1 = raw_json.get("record_type") and patient.get("first_name") and patient.get("last_name")
+    if has_v1:
+        return "v1"
+    raise ValueError("unable to infer emit version from raw object")
 
 
 def build_event(
@@ -96,6 +126,35 @@ def build_event(
         "correlation_id": correlation_id_for(record_id),
         "source": source,
         "record_id": record_id,
+        "raw_object": {
+            "bucket": bucket,
+            "key": key,
+            "sha256": sha256_hex,
+            "size_bytes": size_bytes,
+        },
+    }
+
+
+def build_event_v2(
+    record_id: str,
+    source: str,
+    bucket: str,
+    key: str,
+    sha256_hex: str,
+    size_bytes: int,
+    record_kind: str,
+    schema_hint: str,
+) -> dict:
+    return {
+        "event_version": "2",
+        "event_type": "record.ingested",
+        "event_id": str(uuid.uuid4()),
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "correlation_id": correlation_id_for(record_id),
+        "source": source,
+        "record_id": record_id,
+        "record_kind": record_kind,
+        "schema_hint": schema_hint,
         "raw_object": {
             "bucket": bucket,
             "key": key,
@@ -162,7 +221,8 @@ def replay(args: argparse.Namespace) -> int:
     minio_secret_key = get_env("MINIO_SECRET_KEY")
     bucket = get_bucket_env()
     kafka_brokers = get_env("KAFKA_BROKERS")
-    topic = os.getenv("TOPIC_RECORD_INGESTED_V1", DEFAULT_TOPIC)
+    topic_v1 = os.getenv("TOPIC_RECORD_INGESTED_V1", DEFAULT_TOPIC_V1)
+    topic_v2 = os.getenv("TOPIC_RECORD_INGESTED_V2", DEFAULT_TOPIC_V2)
 
     client = build_minio_client(minio_endpoint, minio_access_key, minio_secret_key)
     producer = Producer({"bootstrap.servers": kafka_brokers})
@@ -190,8 +250,37 @@ def replay(args: argparse.Namespace) -> int:
                 next_emit_time = time.monotonic()
             next_emit_time = rate_limit(next_emit_time)
 
-        sha256_hex, size_bytes = sha256_and_size(client, bucket, key)
-        event = build_event(record_id, args.source, bucket, key, sha256_hex, size_bytes)
+        emit_version = args.emit_version
+        if emit_version == "v1":
+            sha256_hex, size_bytes = sha256_and_size(client, bucket, key)
+            event = build_event(record_id, args.source, bucket, key, sha256_hex, size_bytes)
+            topic = topic_v1
+        else:
+            raw = fetch_raw_object(client, bucket, key)
+            raw_json = json.loads(raw.decode("utf-8"))
+            if emit_version == "auto":
+                emit_version = infer_emit_version(raw_json)
+            sha256_hex = sha256_hex_bytes(raw)
+            size_bytes = len(raw)
+            if emit_version == "v1":
+                event = build_event(record_id, args.source, bucket, key, sha256_hex, size_bytes)
+                topic = topic_v1
+            else:
+                record_kind = raw_json.get("record_kind")
+                schema_hint = raw_json.get("schema_hint")
+                if not record_kind or not schema_hint:
+                    raise ValueError("missing record_kind or schema_hint for v2 emit")
+                event = build_event_v2(
+                    record_id,
+                    args.source,
+                    bucket,
+                    key,
+                    sha256_hex,
+                    size_bytes,
+                    record_kind,
+                    schema_hint,
+                )
+                topic = topic_v2
 
         if args.dry_run:
             logger.info(
@@ -268,13 +357,19 @@ def verify(args: argparse.Namespace) -> int:
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Replay raw objects into record.ingested.v1")
+    parser = argparse.ArgumentParser(description="Replay raw objects into record.ingested events")
     parser.add_argument("--source", required=True, help="Source name, e.g. demo-source")
     parser.add_argument("--prefix", help="MinIO prefix (defaults to <source>/)")
     parser.add_argument("--limit", type=int, help="Max number of records to replay")
     parser.add_argument("--dry-run", action="store_true", help="Do not emit Kafka events")
     parser.add_argument("--rate-per-sec", type=float, help="Emit rate limit (events/sec)")
     parser.add_argument("--verify", action="store_true", help="Verify canonical completeness")
+    parser.add_argument(
+        "--emit-version",
+        choices=("v1", "v2", "auto"),
+        default="v1",
+        help="Event version to emit (default: v1)",
+    )
     return parser.parse_args(argv)
 
 

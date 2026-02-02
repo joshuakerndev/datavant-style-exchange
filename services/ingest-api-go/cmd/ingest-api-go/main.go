@@ -78,6 +78,10 @@ func main() {
 		r.Use(httpapi.AuthMiddleware(cfg))
 		r.Post("/ingest", handler.IngestV1)
 	})
+	router.Route("/v2", func(r chi.Router) {
+		r.Use(httpapi.AuthMiddleware(cfg))
+		r.Post("/ingest", handler.IngestV2)
+	})
 
 	srv := &http.Server{
 		Addr:         cfg.Addr,

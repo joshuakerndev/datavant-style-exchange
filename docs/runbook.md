@@ -197,3 +197,95 @@ This runbook validates deterministic replay from raw storage, canonical rebuild,
 7) Verify completeness (raw vs canonical)
    - `docker compose --profile tools run --rm replayer --source demo-source --verify`
    - `missing_count` should be `0`
+
+## Milestone 6 — Schema Evolution: v2 Ingest + Dual-Version Normalization
+
+This runbook validates v2 ingest, dual-version normalization, and versioned DLQ routing.
+
+1) Fresh start (optional)
+   - `docker compose down -v`
+   - `docker compose up --build -d`
+
+2) Verify topics exist
+   - `docker compose exec redpanda rpk topic list --brokers redpanda:9092`
+   - Expect: `record.ingested.v1`, `record.ingested.v2`, `record.ingested.v1.dlq`, `record.ingested.v2.dlq`
+
+3) Verify canonical schema includes new columns
+   - `docker compose exec postgres psql -U exchange -d exchange -c "SELECT column_name FROM information_schema.columns WHERE table_name='canonical_records' AND column_name IN ('event_version','record_kind','schema_hint') ORDER BY column_name;"`
+   - Expect 3 rows: `event_version`, `record_kind`, `schema_hint`
+
+4) v2 ingest happy path
+   - `curl -X POST http://localhost:8080/v2/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: v2-demo-$(date +%s)" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "source": "demo-source",
+       "record_kind": "claim",
+       "schema_hint": "partnerA.v2",
+       "patient": { "given_name": "Sam", "family_name": "Lee", "dob": "1990-01-01" },
+       "payload": { "example": true }
+     }'`
+   - Save the `record_id` from the response
+   - Verify raw object exists in MinIO under `<source>/<record_id>.json` (MinIO console is OK)
+   - Verify canonical row exists and has v2 metadata:
+     - `docker compose exec postgres psql -U exchange -d exchange -c "SELECT record_id, event_version, record_kind, schema_hint, normalized FROM canonical_records WHERE record_id = '<record_id>';"`
+   - Confirm `event_version = 2`, `record_kind = claim`, `schema_hint = partnerA.v2`
+   - Confirm `normalized` includes only `patient_token` and `meta` (no patient fields)
+
+5) v2 idempotency semantics
+   - Same `Idempotency-Key` + same body returns same `record_id`
+   - Same `Idempotency-Key` + different body returns `409`
+   ```bash
+   IDK=v2-idem-$(date +%s)
+   curl -s -X POST http://localhost:8080/v2/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: $IDK" \
+     -H "Content-Type: application/json" \
+     -d '{"source":"demo-source","record_kind":"claim","schema_hint":"partnerA.v2","patient":{"given_name":"Sam","family_name":"Lee","dob":"1990-01-01"},"payload":{"example":true}}'
+   curl -s -X POST http://localhost:8080/v2/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: $IDK" \
+     -H "Content-Type: application/json" \
+     -d '{"source":"demo-source","record_kind":"claim","schema_hint":"partnerA.v2","patient":{"given_name":"Sam","family_name":"Lee","dob":"1990-01-01"},"payload":{"example":true}}'
+   curl -i -X POST http://localhost:8080/v2/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: $IDK" \
+     -H "Content-Type: application/json" \
+     -d '{"source":"demo-source","record_kind":"claim","schema_hint":"partnerA.v2","patient":{"given_name":"Sam","family_name":"Lee","dob":"1990-01-02"},"payload":{"example":true}}'
+   ```
+   - Expect the first two responses to match (`record_id`), and the last to return `409`
+
+6) v2 validation
+   - Invalid `record_kind` returns `400`
+   ```bash
+   curl -i -X POST http://localhost:8080/v2/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: v2-bad-$(date +%s)" \
+     -H "Content-Type: application/json" \
+     -d '{"source":"demo-source","record_kind":"bad_kind","schema_hint":"partnerA.v2","patient":{"given_name":"Sam","family_name":"Lee","dob":"1990-01-01"},"payload":{"example":true}}'
+   ```
+
+7) v1 remains supported
+   - `curl -X POST http://localhost:8080/v1/ingest \
+     -H "Authorization: Bearer dev" \
+     -H "Idempotency-Key: v1-demo-$(date +%s)" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "source": "demo-source",
+       "record_type": "lab_result",
+       "patient": { "first_name": "Sam", "last_name": "Lee", "dob": "1990-01-01" },
+       "payload": { "example": true }
+     }'`
+   - Verify canonical row has v1 metadata:
+     - `docker compose exec postgres psql -U exchange -d exchange -c "SELECT record_id, event_version, record_kind, schema_hint FROM canonical_records WHERE record_id = '<record_id>';"`
+   - Expect `event_version = 1` and `record_kind`/`schema_hint` are `NULL`
+
+8) DLQ routing by version
+   - Stop tokenizer:
+     - `docker compose stop tokenizer`
+   - Ingest a v2 record (same payload as step 4 with new Idempotency-Key)
+   - Wait for retries to exhaust, then consume one DLQ message:
+     - `docker compose exec redpanda rpk topic consume record.ingested.v2.dlq -n 1 --brokers redpanda:9092`
+   - Restart tokenizer:
+     - `docker compose start tokenizer`

@@ -51,8 +51,8 @@ def normalize(
     """Normalize raw payload to canonical JSON."""
     raw_json = json.loads(raw.decode("utf-8"))
     patient = raw_json.get("patient") or {}
-    given_name = patient.get("first_name")
-    family_name = patient.get("last_name")
+    given_name = patient.get("first_name") or patient.get("given_name")
+    family_name = patient.get("last_name") or patient.get("family_name")
     dob = patient.get("dob")
     ssn = patient.get("ssn")
 
@@ -111,7 +111,10 @@ def write_canonical(conn: psycopg.Connection, record: Dict[str, Any]) -> str:
                 raw_sha256,
                 normalized,
                 ingested_at,
-                correlation_id
+                correlation_id,
+                event_version,
+                record_kind,
+                schema_hint
             )
             VALUES (
                 %(record_id)s,
@@ -120,7 +123,10 @@ def write_canonical(conn: psycopg.Connection, record: Dict[str, Any]) -> str:
                 %(raw_sha256)s,
                 %(normalized)s,
                 %(ingested_at)s,
-                %(correlation_id)s
+                %(correlation_id)s,
+                %(event_version)s,
+                %(record_kind)s,
+                %(schema_hint)s
             )
             ON CONFLICT (record_id) DO NOTHING
             """,
@@ -132,6 +138,9 @@ def write_canonical(conn: psycopg.Connection, record: Dict[str, Any]) -> str:
                 "normalized": Json(record["normalized"]),
                 "ingested_at": record["ingested_at"],
                 "correlation_id": record["correlation_id"],
+                "event_version": record.get("event_version"),
+                "record_kind": record.get("record_kind"),
+                "schema_hint": record.get("schema_hint"),
             },
         )
         conn.commit()
@@ -165,6 +174,17 @@ def sha256_hex(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def parse_occurred_at(value: str) -> datetime:
+    if not value:
+        raise ValueError("missing occurred_at")
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def safe_error_message(exc: Exception) -> str:
     if isinstance(exc, MissingPatientIdentifiersError):
         return "missing patient identifiers"
@@ -181,8 +201,20 @@ def main() -> int:
     logger = logging.getLogger("normalizer-worker")
 
     kafka_brokers = get_env("KAFKA_BROKERS")
-    kafka_topic = get_env("KAFKA_TOPIC")
-    kafka_dlq_topic = get_env("KAFKA_DLQ_TOPIC")
+    kafka_topics_env = os.getenv("KAFKA_TOPICS")
+    if kafka_topics_env:
+        kafka_topics = [topic.strip() for topic in kafka_topics_env.split(",") if topic.strip()]
+        if not kafka_topics:
+            raise RuntimeError("Missing required env var: KAFKA_TOPICS")
+    else:
+        kafka_topic = get_env("KAFKA_TOPIC")
+        kafka_topics = [kafka_topic]
+    kafka_dlq_topic_v1 = os.getenv("KAFKA_DLQ_TOPIC_V1") or os.getenv("KAFKA_DLQ_TOPIC")
+    kafka_dlq_topic_v2 = os.getenv("KAFKA_DLQ_TOPIC_V2") or os.getenv("KAFKA_DLQ_TOPIC")
+    if not kafka_dlq_topic_v1:
+        raise RuntimeError("Missing required env var: KAFKA_DLQ_TOPIC_V1")
+    if not kafka_dlq_topic_v2:
+        raise RuntimeError("Missing required env var: KAFKA_DLQ_TOPIC_V2")
     kafka_group_id = get_env("KAFKA_GROUP_ID")
     minio_endpoint = get_env("MINIO_ENDPOINT")
     minio_access_key = get_env("MINIO_ACCESS_KEY")
@@ -235,7 +267,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    consumer.subscribe([kafka_topic])
+    consumer.subscribe(kafka_topics)
 
     try:
         while running:
@@ -254,10 +286,11 @@ def main() -> int:
                 stage = "parse_event"
                 try:
                     event = json.loads(msg.value().decode("utf-8"))
+                    event_version = event.get("event_version")
                     record_id = event.get("record_id")
                     source = event.get("source")
                     correlation_id = event.get("correlation_id")
-                    ingested_at = event.get("occurred_at")
+                    ingested_at_raw = event.get("occurred_at")
                     raw_object = event.get("raw_object") or {}
                     raw_object_key = raw_object.get("key")
                     raw_sha256 = raw_object.get("sha256")
@@ -265,10 +298,10 @@ def main() -> int:
                     raw_size_bytes = raw_object.get("size_bytes")
 
                     if (
-                        event.get("event_version") != "1"
+                        event_version not in ("1", "2")
                         or event.get("event_type") != "record.ingested"
                         or not event.get("event_id")
-                        or not ingested_at
+                        or not ingested_at_raw
                         or not correlation_id
                         or not source
                         or not record_id
@@ -278,6 +311,16 @@ def main() -> int:
                         or raw_size_bytes is None
                     ):
                         raise ValueError("missing required event fields")
+
+                    ingested_at = parse_occurred_at(ingested_at_raw)
+
+                    record_kind = None
+                    schema_hint = None
+                    if event_version == "2":
+                        record_kind = event.get("record_kind")
+                        schema_hint = event.get("schema_hint")
+                        if not record_kind or not schema_hint:
+                            raise ValueError("missing required v2 event fields")
 
                     if not isinstance(raw_size_bytes, int) or raw_size_bytes < 1:
                         raise ValueError("invalid raw_object.size_bytes")
@@ -306,6 +349,9 @@ def main() -> int:
                                 "normalized": normalized,
                                 "ingested_at": ingested_at,
                                 "correlation_id": correlation_id,
+                                "event_version": event_version,
+                                "record_kind": record_kind,
+                                "schema_hint": schema_hint,
                             },
                         )
                     except psycopg.OperationalError:
@@ -320,6 +366,9 @@ def main() -> int:
                                 "normalized": normalized,
                                 "ingested_at": ingested_at,
                                 "correlation_id": correlation_id,
+                                "event_version": event_version,
+                                "record_kind": record_kind,
+                                "schema_hint": schema_hint,
                             },
                         )
 
@@ -345,10 +394,13 @@ def main() -> int:
                         err_type,
                     )
                     if attempt >= max_attempts:
+                        dlq_topic = kafka_dlq_topic_v1
+                        if event.get("event_version") == "2":
+                            dlq_topic = kafka_dlq_topic_v2
                         try:
                             publish_dlq(
                                 producer,
-                                kafka_dlq_topic,
+                                dlq_topic,
                                 {
                                     "original_event": event
                                     or {

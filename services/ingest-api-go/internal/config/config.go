@@ -18,6 +18,7 @@ type Config struct {
 	PostgresDSN           string
 	KafkaBrokers          []string
 	TopicRecordIngestedV1 string
+	TopicRecordIngestedV2 string
 	JwtIssuer             string
 	JwtAudience           string
 	JwtSecret             string
@@ -32,6 +33,7 @@ func Load() (Config, error) {
 		RawBucket:             os.Getenv("RAW_BUCKET"),
 		PostgresDSN:           buildPostgresDSN(),
 		TopicRecordIngestedV1: os.Getenv("TOPIC_RECORD_INGESTED_V1"),
+		TopicRecordIngestedV2: os.Getenv("TOPIC_RECORD_INGESTED_V2"),
 		JwtIssuer:             os.Getenv("JWT_ISSUER"),
 		JwtAudience:           os.Getenv("JWT_AUDIENCE"),
 		JwtSecret:             os.Getenv("JWT_SECRET"),
@@ -64,6 +66,9 @@ func Load() (Config, error) {
 	}
 	if cfg.TopicRecordIngestedV1 == "" {
 		return Config{}, fmt.Errorf("missing TOPIC_RECORD_INGESTED_V1")
+	}
+	if cfg.TopicRecordIngestedV2 == "" {
+		return Config{}, fmt.Errorf("missing TOPIC_RECORD_INGESTED_V2")
 	}
 	if cfg.JwtIssuer == "" || cfg.JwtAudience == "" || cfg.JwtSecret == "" {
 		return Config{}, fmt.Errorf("missing JWT_ISSUER, JWT_AUDIENCE, or JWT_SECRET")

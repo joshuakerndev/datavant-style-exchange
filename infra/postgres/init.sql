@@ -39,3 +39,8 @@ CREATE TABLE IF NOT EXISTS canonical_records (
   normalized_at timestamptz NOT NULL DEFAULT now(),
   correlation_id text NOT NULL
 );
+
+ALTER TABLE canonical_records
+  ADD COLUMN IF NOT EXISTS event_version text,
+  ADD COLUMN IF NOT EXISTS record_kind text,
+  ADD COLUMN IF NOT EXISTS schema_hint text;
