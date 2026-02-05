@@ -125,8 +125,9 @@ Operator checks:
 ## Replay vs reconciliation: when to use which
 
 - **Replay (implemented):** deterministic re-emit of raw objects; use for backfills or to rebuild canonical when raw objects exist.
-- **Reconciliation (planned):** explicit raw↔canonical comparison + repair for the non-atomic boundary.
-  - Use reconciliation once the ledger/manifest exists; it will surface orphans and missing canonical rows.
+- **Reconciliation (implemented, report-only):** explicit raw↔manifest↔canonical comparison for the non-atomic boundary.
+  - Run: `docker compose --profile tools run --rm reconciler --source <source>`
+  - Repair mode remains future work (this milestone is report-only).
 
 ## Known failure modes and how to reason about them
 
@@ -271,6 +272,9 @@ This runbook validates deterministic replay from raw storage, canonical rebuild,
 7) Verify completeness (raw vs canonical)
    - `docker compose --profile tools run --rm replayer --source demo-source --verify`
    - `missing_count` should be `0`
+
+8) Reconcile raw, manifest, canonical (report-only)
+   - `docker compose --profile tools run --rm reconciler --source demo-source`
 
 ## Milestone 6 — Dual-Version Compatibility (Local)
 

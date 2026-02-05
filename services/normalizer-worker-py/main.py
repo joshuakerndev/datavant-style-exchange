@@ -143,8 +143,35 @@ def write_canonical(conn: psycopg.Connection, record: Dict[str, Any]) -> str:
                 "schema_hint": record.get("schema_hint"),
             },
         )
-        conn.commit()
         return "ok" if cur.rowcount == 1 else "dup"
+
+
+def mark_manifest_canonicalized(
+    conn: psycopg.Connection,
+    record_id: str,
+    logger: logging.Logger,
+    correlation_id: Optional[str],
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE raw_object_manifest
+            SET state = 'canonicalized', updated_at = now()
+            WHERE record_id = %s AND state IN ('written', 'enqueued')
+            """,
+            (record_id,),
+        )
+        if cur.rowcount == 0:
+            cur.execute(
+                "SELECT 1 FROM raw_object_manifest WHERE record_id = %s",
+                (record_id,),
+            )
+            if cur.fetchone() is None:
+                logger.warning(
+                    "manifest_missing record_id=%s correlation_id=%s",
+                    record_id,
+                    correlation_id,
+                )
 
 
 def publish_dlq(producer: Producer, topic: str, payload: Dict[str, Any]) -> None:
@@ -338,39 +365,47 @@ def main() -> int:
                     normalized = normalize(raw, tokenizer_http, tokenizer_addr, tokenizer_auth)
 
                     stage = "write_canonical"
+                    record_payload = {
+                        "record_id": record_id,
+                        "source": source,
+                        "raw_object_key": raw_object_key,
+                        "raw_sha256": raw_sha256,
+                        "normalized": normalized,
+                        "ingested_at": ingested_at,
+                        "correlation_id": correlation_id,
+                        "event_version": event_version,
+                        "record_kind": record_kind,
+                        "schema_hint": schema_hint,
+                    }
                     try:
-                        status = write_canonical(
-                            db_conn,
-                            {
-                                "record_id": record_id,
-                                "source": source,
-                                "raw_object_key": raw_object_key,
-                                "raw_sha256": raw_sha256,
-                                "normalized": normalized,
-                                "ingested_at": ingested_at,
-                                "correlation_id": correlation_id,
-                                "event_version": event_version,
-                                "record_kind": record_kind,
-                                "schema_hint": schema_hint,
-                            },
-                        )
+                        status = write_canonical(db_conn, record_payload)
+                        try:
+                            mark_manifest_canonicalized(db_conn, record_id, logger, correlation_id)
+                        except psycopg.OperationalError:
+                            raise
+                        except Exception as manifest_exc:
+                            logger.warning(
+                                "manifest_update_failed record_id=%s correlation_id=%s error_type=%s",
+                                record_id,
+                                correlation_id,
+                                type(manifest_exc).__name__,
+                            )
+                        db_conn.commit()
                     except psycopg.OperationalError:
                         db_conn = psycopg.connect(postgres_dsn)
-                        status = write_canonical(
-                            db_conn,
-                            {
-                                "record_id": record_id,
-                                "source": source,
-                                "raw_object_key": raw_object_key,
-                                "raw_sha256": raw_sha256,
-                                "normalized": normalized,
-                                "ingested_at": ingested_at,
-                                "correlation_id": correlation_id,
-                                "event_version": event_version,
-                                "record_kind": record_kind,
-                                "schema_hint": schema_hint,
-                            },
-                        )
+                        status = write_canonical(db_conn, record_payload)
+                        try:
+                            mark_manifest_canonicalized(db_conn, record_id, logger, correlation_id)
+                        except psycopg.OperationalError:
+                            raise
+                        except Exception as manifest_exc:
+                            logger.warning(
+                                "manifest_update_failed record_id=%s correlation_id=%s error_type=%s",
+                                record_id,
+                                correlation_id,
+                                type(manifest_exc).__name__,
+                            )
+                        db_conn.commit()
 
                     logger.info(
                         "processed record_id=%s correlation_id=%s status=%s stage=write_canonical",

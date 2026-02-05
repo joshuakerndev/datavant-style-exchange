@@ -151,7 +151,7 @@ Contracts define intended interfaces; runtime behavior is authoritative:
 - **Outbox table** (`outbox_events`) — durable event queue for eventual publish
 - **Canonical storage** (`canonical_records`) — idempotent sink of normalized records
 - **Replay tooling** (`replayer-cli-py`) — deterministic backfill + completeness verification
-- **(Planned) Reconciliation + processing ledger** — explicit raw↔canonical reconciliation + processing attempts
+- **Reconciliation tooling** (`reconciler-cli-py`) — raw↔manifest↔canonical reconciliation (report-only)
 
 ---
 

@@ -44,3 +44,21 @@ ALTER TABLE canonical_records
   ADD COLUMN IF NOT EXISTS event_version text,
   ADD COLUMN IF NOT EXISTS record_kind text,
   ADD COLUMN IF NOT EXISTS schema_hint text;
+
+CREATE TABLE IF NOT EXISTS raw_object_manifest (
+  record_id text PRIMARY KEY CHECK (record_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+  source text NOT NULL,
+  bucket text NOT NULL,
+  object_key text NOT NULL,
+  sha256 text NOT NULL,
+  size_bytes bigint NOT NULL,
+  state text NOT NULL CHECK (state IN ('written','enqueued','canonicalized','orphaned')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_object_manifest_source_state
+  ON raw_object_manifest (source, state);
+
+CREATE INDEX IF NOT EXISTS idx_raw_object_manifest_state_updated_at
+  ON raw_object_manifest (state, updated_at);

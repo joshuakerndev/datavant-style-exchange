@@ -95,6 +95,10 @@ services:
         condition: service_completed_successfully
       redpanda:
         condition: service_healthy
+      redpanda-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
   tokenizer:
     build:
@@ -161,6 +165,24 @@ services:
       minio:
         condition: service_healthy
       redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  reconciler:
+    build:
+      context: ../services/reconciler-cli-py
+    profiles: ["tools"]
+    env_file:
+      - ../.env
+    environment:
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      RAW_BUCKET: ${RAW_BUCKET:-raw-objects}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://exchange:exchange@postgres:5432/exchange?sslmode=disable}
+    depends_on:
+      minio:
         condition: service_healthy
       postgres:
         condition: service_healthy

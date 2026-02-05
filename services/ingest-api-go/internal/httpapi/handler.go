@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -140,6 +141,13 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.upsertManifestWrittenTx(r.Context(), tx, recordID, record.Source, h.cfg.RawBucket, key, shaHex, int64(len(body))); err != nil {
+		h.logger.Error("failed to persist manifest", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatus(http.StatusInternalServerError)
+		h.respondError(w, http.StatusInternalServerError, "failed to persist manifest")
+		return
+	}
+
 	response := ingest.IngestAccepted{RecordID: recordID, CorrelationID: correlationID}
 	responseBytes, err := json.Marshal(response)
 	if err != nil {
@@ -160,6 +168,13 @@ func (h *Handler) IngestV1(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to persist outbox event", "error", err, "record_id", recordID, "correlation_id", correlationID)
 		h.recordIngestStatus(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to persist outbox event")
+		return
+	}
+
+	if err := h.markManifestEnqueuedTx(r.Context(), tx, recordID); err != nil {
+		h.logger.Error("failed to update manifest state", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatus(http.StatusInternalServerError)
+		h.respondError(w, http.StatusInternalServerError, "failed to persist manifest")
 		return
 	}
 
@@ -270,6 +285,13 @@ func (h *Handler) IngestV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.upsertManifestWrittenTx(r.Context(), tx, recordID, record.Source, h.cfg.RawBucket, key, shaHex, int64(len(body))); err != nil {
+		h.logger.Error("failed to persist manifest", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatusV2(http.StatusInternalServerError)
+		h.respondError(w, http.StatusInternalServerError, "failed to persist manifest")
+		return
+	}
+
 	response := ingest.IngestAccepted{RecordID: recordID, CorrelationID: correlationID}
 	responseBytes, err := json.Marshal(response)
 	if err != nil {
@@ -290,6 +312,13 @@ func (h *Handler) IngestV2(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to persist outbox event", "error", err, "record_id", recordID, "correlation_id", correlationID)
 		h.recordIngestStatusV2(http.StatusInternalServerError)
 		h.respondError(w, http.StatusInternalServerError, "failed to persist outbox event")
+		return
+	}
+
+	if err := h.markManifestEnqueuedTx(r.Context(), tx, recordID); err != nil {
+		h.logger.Error("failed to update manifest state", "error", err, "record_id", recordID, "correlation_id", correlationID)
+		h.recordIngestStatusV2(http.StatusInternalServerError)
+		h.respondError(w, http.StatusInternalServerError, "failed to persist manifest")
 		return
 	}
 
@@ -502,5 +531,58 @@ func (h *Handler) storeIdempotencyTx(ctx context.Context, tx *sql.Tx, key, reque
 		return err
 	}
 
+	return nil
+}
+
+func (h *Handler) upsertManifestWrittenTx(ctx context.Context, tx *sql.Tx, recordID, source, bucket, objectKey, sha string, sizeBytes int64) error {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO raw_object_manifest
+		 (record_id, source, bucket, object_key, sha256, size_bytes, state, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'written', now(), now())
+		 ON CONFLICT (record_id)
+		 DO UPDATE SET source=EXCLUDED.source,
+		   bucket=EXCLUDED.bucket,
+		   object_key=EXCLUDED.object_key,
+		   sha256=EXCLUDED.sha256,
+		   size_bytes=EXCLUDED.size_bytes,
+		   state=CASE
+		     WHEN raw_object_manifest.state IN ('canonicalized','orphaned') THEN raw_object_manifest.state
+		     ELSE 'written'
+		   END,
+		   updated_at=now()`,
+		recordID,
+		source,
+		bucket,
+		objectKey,
+		sha,
+		sizeBytes,
+	)
+	return err
+}
+
+func (h *Handler) markManifestEnqueuedTx(ctx context.Context, tx *sql.Tx, recordID string) error {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE raw_object_manifest
+		 SET state='enqueued', updated_at=now()
+		 WHERE record_id=$1`,
+		recordID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("manifest row not found for record_id %s", recordID)
+	}
 	return nil
 }
