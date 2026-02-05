@@ -26,10 +26,11 @@ This is NOT a toy CRUD app.
 
 ### ingest-api-go
 - Language: Go
-- REST endpoints: `GET /healthz`, `POST /v1/ingest`, `POST /v2/ingest`
+- REST endpoints: `GET /healthz`, `GET /metrics`, `POST /v1/ingest`, `POST /v2/ingest`
 - Requires `Idempotency-Key` (min length enforced)
 - v1 `record_type` enum: `encounter`, `claim`, `lab_result`
 - v2 requires `record_kind` enum (`encounter`, `claim`, `lab_result`) and `schema_hint`
+- Hardening means contract conformance tests, compatibility guarantees, and replay invariants under schema evolution (planned).
 - Idempotency uses Postgres `idempotency_keys`:
   - request hash is SHA-256 of body, stored as hex
   - same key + same body → replayed response (same `record_id`/`correlation_id`)
@@ -52,18 +53,19 @@ This is NOT a toy CRUD app.
 - No PII in logs
 
 ### normalizer-worker-py
-- Consumes `record.ingested.v1` and `record.ingested.v2` (via `KAFKA_TOPICS` or single-topic mode)
+- Consumes `KAFKA_TOPICS` (default: `record.ingested.v1,record.ingested.v2`) or single-topic `KAFKA_TOPIC`
 - Fetches raw objects from MinIO
 - Writes to `canonical_records` idempotently (ON CONFLICT DO NOTHING)
 - Persists v2 metadata to `canonical_records` (`event_version`, `record_kind`, `schema_hint`; nullable for v1)
 - Parses `occurred_at` into a timezone-aware datetime before inserting `ingested_at`
-- Retries with bounded backoff; on failure publishes to `record.ingested.v1.dlq` or `record.ingested.v2.dlq`
+- Retries with bounded backoff; on failure publishes to `KAFKA_DLQ_TOPIC_V1`/`KAFKA_DLQ_TOPIC_V2` (fallback `KAFKA_DLQ_TOPIC`)
 - Commits Kafka offsets only after DB success (including dup) or DLQ publish success
 
 ### replayer-cli-py
 - Deterministic replay tool
 - Emits v1, v2, or auto-inferred events from raw storage (`--emit-version {v1,v2,auto}`, default v1)
 - Deterministic inference rules based on raw object shape
+- Topics default to `record.ingested.v1`/`record.ingested.v2` (override via `TOPIC_RECORD_INGESTED_V1`/`TOPIC_RECORD_INGESTED_V2`)
 - Verifies canonical completeness
 
 ### Infrastructure
@@ -76,13 +78,36 @@ This is NOT a toy CRUD app.
 
 ## Important constraints
 
-- **Contracts are source of truth**
+- **Contracts define intended interfaces**
   - OpenAPI, event schemas, GraphQL schema
+  - Runtime behavior and mounted routes are authoritative
 - Avoid changing existing API shapes
 - Avoid logging PII
 - Prefer small, composable changes
 - Favor explicit error handling
 - Do not “fix” known limitations unless explicitly instructed.
+
+---
+
+## Why Python + SQL are used this way (intentional)
+
+- **Python** is for deterministic pipeline logic: normalization, backfills/replay, reconciliation, derived datasets.
+- **SQL** is for correctness and auditability: idempotency, exactly-once effects, immutable facts, and traceable state.
+- The system favors explicit SQL writes over ORMs so state transitions are readable and enforceable.
+
+## Non-atomic boundary (explicit)
+
+Raw object storage and DB commits are not atomic today. A crash after MinIO writes but before Postgres commit can orphan raw objects.
+This is a deliberate platform boundary; reconciliation is the expected tool to close the gap.
+
+## Planned Platform Extensions (Intentional, Additive)
+
+- **raw_object_manifest + reconciliation** — track raw objects and reconcile against canonical
+- **processing attempt/state tables** — SQL ledger for idempotent, exactly-once downstream effects
+- **job_runs + job_checkpoints** — Python-driven batch job metadata and restartability
+- **derived datasets** — materialized tables driven by canonical data
+
+These are additive evolutions that preserve current contracts and idempotency guarantees.
 
 
 ---

@@ -62,6 +62,80 @@ Kafka is restored.
 - MinIO writes and DB transactions are not atomic; a crash after MinIO write but before DB commit can orphan a raw object.
 - This tradeoff is intentional and documented.
 
+## Investigating missing canonical records
+
+Goal: determine whether the gap is raw storage, publish/consume, or normalization.
+
+1) Verify raw object exists
+   - MinIO console or `mc` (if configured)
+   - Expected key: `<source>/<record_id>.json`
+
+2) Verify outbox publish status
+   - `docker compose exec postgres psql -U exchange -d exchange`
+   - Query:
+   ```sql
+   SELECT id, topic, key, created_at, published_at
+   FROM outbox_events
+   WHERE key = '<record_id>'
+   ORDER BY id DESC
+   LIMIT 5;
+   ```
+
+3) Check Kafka consumption + DLQ
+   - `docker compose exec redpanda rpk topic consume record.ingested.v1 -n 1 --brokers redpanda:9092`
+   - `docker compose exec redpanda rpk topic consume record.ingested.v1.dlq -n 1 --brokers redpanda:9092`
+   - Repeat for `v2` if applicable
+
+4) Verify canonical row
+   - `docker compose exec postgres psql -U exchange -d exchange`
+   - `SELECT record_id, normalized_at FROM canonical_records WHERE record_id = '<record_id>';`
+
+5) Use replay/verify if raw exists but canonical is missing
+   - `docker compose --profile tools run --rm replayer --source <source> --verify`
+   - If the missing record is in raw storage, re-emit with replay:
+     - `docker compose --profile tools run --rm replayer --source <source> --limit 1`
+
+## Outbox backlog or publish failures
+
+Symptoms: `outbox_events.published_at` stays NULL, ingest succeeds but no downstream processing.
+
+1) Confirm backlog
+   ```sql
+   SELECT count(*) FROM outbox_events WHERE published_at IS NULL;
+   ```
+2) Validate Kafka connectivity
+   - Check `KAFKA_BROKERS` env on `ingest-api-go`
+   - Restart Redpanda if needed: `docker compose restart redpanda`
+3) Observe publisher logs
+   - `docker compose logs -f ingest-api-go`
+   - Look for `outbox publish failed` or `failed to publish outbox event`
+
+## Normalizer failures & DLQ behavior
+
+The normalizer retries with exponential backoff (`MAX_ATTEMPTS`, `BACKOFF_BASE_MS`), and only commits offsets after:
+1) canonical write succeeds (or is a duplicate), or
+2) the DLQ publish succeeds.
+
+Operator checks:
+- Consume DLQ messages:
+  - `record.ingested.v1.dlq` and `record.ingested.v2.dlq`
+- Inspect DLQ envelope fields: `original_event`, `error.type`, `error.message`, `error.stage`, `attempts`, `failed_at`
+- Check `normalizer-worker-py` logs for stage and error type
+
+## Replay vs reconciliation: when to use which
+
+- **Replay (implemented):** deterministic re-emit of raw objects; use for backfills or to rebuild canonical when raw objects exist.
+- **Reconciliation (planned):** explicit raw↔canonical comparison + repair for the non-atomic boundary.
+  - Use reconciliation once the ledger/manifest exists; it will surface orphans and missing canonical rows.
+
+## Known failure modes and how to reason about them
+
+- **Kafka down:** ingest succeeds; outbox grows; publish resumes when Kafka returns.
+- **MinIO down:** ingest fails before DB writes; no outbox entry or idempotency row is created.
+- **Postgres down:** ingest fails; no raw->DB handshake beyond raw object write; normalizer cannot write canonical.
+- **Tokenizer down:** normalizer retries then DLQ; no PII in DLQ envelopes.
+- **Non-atomic raw/DB boundary:** raw objects can exist without corresponding DB rows; use replay now, reconciliation later.
+
 ## Milestone 3 — Normalizer Worker
 
 This runbook validates the normalizer worker happy path, DLQ behavior, and idempotency.
@@ -198,9 +272,11 @@ This runbook validates deterministic replay from raw storage, canonical rebuild,
    - `docker compose --profile tools run --rm replayer --source demo-source --verify`
    - `missing_count` should be `0`
 
-## Milestone 6 — Schema Evolution: v2 Ingest + Dual-Version Normalization
+## Milestone 6 — Dual-Version Compatibility (Local)
 
 This runbook validates v2 ingest, dual-version normalization, and versioned DLQ routing.
+It is a local schema-evolution exercise, not end-to-end production hardening.
+Topic creation source of truth is `infra/redpanda/init.sh`; keep helper scripts in sync.
 
 1) Fresh start (optional)
    - `docker compose down -v`

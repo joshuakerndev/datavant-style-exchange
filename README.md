@@ -30,16 +30,24 @@ This repository mirrors the real-world platform concerns:
 
 ---
 
+## Platform implementation choices (intentional)
+
+- **Python** for deterministic pipeline logic: normalization, replay/backfill, and future reconciliation/derived datasets
+- **SQL** for correctness and auditability: idempotency, outbox durability, and canonical writes
+
+---
+
 ## Architecture (current state)
 
 ### Implemented services
 - **`ingest-api-go`**
-  - REST API (`GET /healthz`, `POST /v1/ingest`, `POST /v2/ingest`)
+  - REST API (`GET /healthz`, `GET /metrics`, `POST /v1/ingest`, `POST /v2/ingest`)
   - Payload validation
   - Idempotency via Postgres (see notes on current guarantees)
   - Raw object persistence to S3 (MinIO)
   - Event publication to Kafka (Redpanda) via Postgres outbox + background publisher
   - Correlation IDs and structured logging
+  - v2 handler is routed and emits v2 events; production hardening remains planned
 - **`tokenizer-go`**
   - REST API (`GET /healthz`, `POST /tokenize`)
   - Deterministic HMAC tokenization of patient identifiers
@@ -47,10 +55,10 @@ This repository mirrors the real-world platform concerns:
   - No PII in logs
   - Canonicalization rules documented in `docs/decisions/0001-tokenization-canonicalization.md`
 - **`normalizer-worker-py`**
-  - Kafka consumer for `record.ingested.v1` and `record.ingested.v2`
+  - Kafka consumer for `KAFKA_TOPICS` (default: `record.ingested.v1,record.ingested.v2`) or single-topic `KAFKA_TOPIC`
   - Fetches raw objects from MinIO
   - Writes canonical records idempotently to Postgres
-  - Bounded retries + DLQ publish on failure (versioned DLQs: `record.ingested.v1.dlq`, `record.ingested.v2.dlq`)
+  - Bounded retries + DLQ publish on failure (topics via `KAFKA_DLQ_TOPIC_V1`/`KAFKA_DLQ_TOPIC_V2`, fallback `KAFKA_DLQ_TOPIC`)
 - **`replayer-cli-py`**
   - CLI tool for deterministic replay of raw objects from MinIO
   - Re-emits `record.ingested` events with `--emit-version {v1,v2,auto}`
@@ -70,7 +78,7 @@ This repository mirrors the real-world platform concerns:
 
 ## Contracts-first development
 
-All behavior is driven by versioned contracts:
+Contracts define intended interfaces; runtime behavior is authoritative:
 
 - `contracts/api/*openapi.yaml` — REST APIs
 - `contracts/events/*json` — Kafka event schemas
@@ -98,6 +106,12 @@ All behavior is driven by versioned contracts:
 - Re-emit events deterministically
 - Validate canonical completeness
 
+### Pipeline semantics (current)
+- **Ingest returns 202 only after** raw write succeeds and the DB transaction commits (outbox + idempotency).
+- **Outbox publish is at-least-once**; Kafka publish can be retried without duplicating canonical rows.
+- **Normalizer writes are idempotent** (`ON CONFLICT DO NOTHING` on `canonical_records`).
+- **DLQ is terminal for a failed event** once retries are exhausted; replay is the recovery path.
+
 ---
 
 ## Security model (local + production intent)
@@ -118,7 +132,7 @@ All behavior is driven by versioned contracts:
 - **Per-key idempotency serialization via Postgres advisory lock**
 - Deterministic request hashing
 - Durable raw object storage
-- Reprocessing workflows
+- Deterministic reprocessing workflows
 - Bounded retries + DLQ handling (normalizer worker)
 - Correlation IDs across logs and events
 
@@ -126,9 +140,18 @@ All behavior is driven by versioned contracts:
 - See "Planned milestones" below
 
 ### Notes on current guarantees
-- Idempotency + outbox rows are persisted transactionally after MinIO write succeeds
-- Kafka downtime no longer breaks ingest; events queue in Postgres and publish later
-- Remaining limitation: MinIO and Postgres are not atomic, so a crash after MinIO write but before tx commit can orphan a raw object
+- **Idempotency is strict per Idempotency-Key** (same body => same response; different body => 409)
+- **Outbox is durable** (events persist in Postgres and publish asynchronously; at-least-once delivery)
+- **Replay is safe** (deterministic re-emit + canonical writes are idempotent)
+- **Known limitation:** raw object storage and DB commits are not atomic, so a crash after MinIO write but before tx commit can orphan a raw object
+
+## Data Platform Guarantees & Artifacts
+
+- **Idempotency table** (`idempotency_keys`) — strict dedupe + conflict detection
+- **Outbox table** (`outbox_events`) — durable event queue for eventual publish
+- **Canonical storage** (`canonical_records`) — idempotent sink of normalized records
+- **Replay tooling** (`replayer-cli-py`) — deterministic backfill + completeness verification
+- **(Planned) Reconciliation + processing ledger** — explicit raw↔canonical reconciliation + processing attempts
 
 ---
 
@@ -182,16 +205,15 @@ Tokenization: complete
 
 Reprocessing / backfill: complete
 
-Schema evolution (v2 ingest): complete
+Schema evolution (v2 ingest API + dual-version events): complete (local stack; production hardening is future work)
 
-## Next milestones (planned)
+## Roadmap / Next Milestones
 
 The core data exchange platform is complete. The next phase focuses on **Python/SQL-heavy data processing**, aligned with real-world data platform needs.
 
-Planned milestones:
-
-- **Derived analytics / data processing (Python + SQL)**
-  - Batch-oriented Python jobs that read from canonical records
-  - Materialize derived tables using explicit SQL (aggregations, window functions)
-  - Idempotent, verifiable backfills and data quality checks
+- **Reconciliation + repair tooling** — detect and remediate raw↔canonical gaps from the non-atomic boundary
+- **SQL-backed processing ledger** — track processing attempts/state for exactly-once effects downstream
+- **Derived datasets + batch jobs** — Python orchestrated, SQL materialized, idempotent backfills
+- **v2 compatibility hardening** — contract conformance tests, compatibility guarantees, replay safety under schema evolution
+- **Data quality gates** — explicit checks before canonical/derived writes
   - Designed to simulate downstream analytics or interoperability pipelines
