@@ -112,3 +112,41 @@ CREATE TABLE IF NOT EXISTS processing_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_processing_attempts_record_pipeline_attempt
   ON processing_attempts (record_id, pipeline, attempt_no);
+
+CREATE TABLE IF NOT EXISTS job_runs (
+  job_run_id bigserial PRIMARY KEY,
+  job_name text NOT NULL,
+  status text NOT NULL CHECK (status IN ('running','succeeded','failed')),
+  started_at timestamptz NOT NULL DEFAULT now(),
+  ended_at timestamptz,
+  params jsonb NOT NULL DEFAULT '{}'::jsonb,
+  progress jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error text
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_runs_name_started_at
+  ON job_runs (job_name, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS job_checkpoints (
+  job_name text PRIMARY KEY,
+  checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS derived_patient_record_index (
+  patient_token text NOT NULL,
+  record_id uuid NOT NULL,
+  source text NOT NULL,
+  event_version text NOT NULL,
+  record_kind text NOT NULL,
+  schema_hint text,
+  ingested_at timestamptz NOT NULL,
+  normalized_at timestamptz NOT NULL,
+  PRIMARY KEY (patient_token, record_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_derived_patient_record_index_patient_token
+  ON derived_patient_record_index (patient_token);
+
+CREATE INDEX IF NOT EXISTS idx_derived_patient_record_index_source_ingested_at
+  ON derived_patient_record_index (source, ingested_at);

@@ -187,6 +187,18 @@ services:
       postgres:
         condition: service_healthy
 
+  derived-jobs:
+    build:
+      context: ../services/derived-jobs-cli-py
+    profiles: ["tools"]
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://exchange:exchange@postgres:5432/exchange?sslmode=disable}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:latest
     ports:

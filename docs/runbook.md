@@ -175,6 +175,49 @@ LIMIT 25;
 - **Tokenizer down:** normalizer retries then DLQ; no PII in DLQ envelopes.
 - **Non-atomic raw/DB boundary:** raw objects can exist without corresponding DB rows; use replay now, reconciliation later.
 
+## Derived jobs: materialize_patient_index
+
+This job scans `canonical_records` and writes into `derived_patient_record_index` using a deterministic order.
+It is restartable and idempotent: the checkpoint only advances after inserts commit, and duplicates are avoided via
+`ON CONFLICT (patient_token, record_id) DO NOTHING`.
+
+Run:
+- `docker compose --profile tools run --rm derived-jobs materialize-patient-index --batch-size 500`
+
+Restartability:
+- Checkpoint is stored in `job_checkpoints` under `materialize_patient_index`.
+- Inserts and checkpoint updates happen in the same transaction.
+- Safe to re-run after failure or interruption; duplicates are ignored.
+
+Inspect state:
+- Recent job runs:
+```sql
+SELECT job_run_id, status, started_at, ended_at, progress, error
+FROM job_runs
+WHERE job_name = 'materialize_patient_index'
+ORDER BY job_run_id DESC
+LIMIT 10;
+```
+- Checkpoint:
+```sql
+SELECT job_name, checkpoint, updated_at
+FROM job_checkpoints
+WHERE job_name = 'materialize_patient_index';
+```
+- Derived counts:
+```sql
+SELECT COUNT(*) FROM derived_patient_record_index;
+```
+
+Verify coverage (report-only):
+- `docker compose --profile tools run --rm derived-jobs materialize-patient-index --verify`
+- Returns non-zero if any eligible canonical rows are missing in derived.
+
+If it fails:
+- Check `job_runs.error` for the failure summary.
+- Re-run the job; it is safe and idempotent.
+- If the checkpoint advances unexpectedly, inspect `job_runs.progress` and confirm it matches the last batch.
+
 ## Milestone 3 — Normalizer Worker
 
 This runbook validates the normalizer worker happy path, DLQ behavior, and idempotency.
