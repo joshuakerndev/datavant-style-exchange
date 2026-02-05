@@ -110,6 +110,8 @@ Contracts define intended interfaces; runtime behavior is authoritative:
 - **Ingest returns 202 only after** raw write succeeds and the DB transaction commits (outbox + idempotency).
 - **Outbox publish is at-least-once**; Kafka publish can be retried without duplicating canonical rows.
 - **Normalizer writes are idempotent** (`ON CONFLICT DO NOTHING` on `canonical_records`).
+- **Normalizer records attempt lifecycle in Postgres**; canonical write + ledger success update commit before Kafka offset commit.
+- **DLQ publish is terminal**; ledger marks DLQ best-effort, and offset commit happens after DLQ publish (and ledger mark if possible).
 - **DLQ is terminal for a failed event** once retries are exhausted; replay is the recovery path.
 
 ---
@@ -134,6 +136,7 @@ Contracts define intended interfaces; runtime behavior is authoritative:
 - Durable raw object storage
 - Deterministic reprocessing workflows
 - Bounded retries + DLQ handling (normalizer worker)
+- SQL-backed processing ledger for downstream attempts/state (normalizer)
 - Correlation IDs across logs and events
 
 ### Planned
@@ -150,6 +153,8 @@ Contracts define intended interfaces; runtime behavior is authoritative:
 - **Idempotency table** (`idempotency_keys`) — strict dedupe + conflict detection
 - **Outbox table** (`outbox_events`) — durable event queue for eventual publish
 - **Canonical storage** (`canonical_records`) — idempotent sink of normalized records
+- **Processing stage state** (`processing_stage_state`) — current processing state per `(record_id, pipeline)`
+- **Processing attempts** (`processing_attempts`) — append-only attempt history (`started`, `succeeded`, `failed`, `dlq_published`)
 - **Replay tooling** (`replayer-cli-py`) — deterministic backfill + completeness verification
 - **Reconciliation tooling** (`reconciler-cli-py`) — raw↔manifest↔canonical reconciliation (report-only)
 
@@ -205,6 +210,8 @@ Tokenization: complete
 
 Reprocessing / backfill: complete
 
+Processing ledger (normalizer): complete
+
 Schema evolution (v2 ingest API + dual-version events): complete (local stack; production hardening is future work)
 
 ## Roadmap / Next Milestones
@@ -212,7 +219,7 @@ Schema evolution (v2 ingest API + dual-version events): complete (local stack; p
 The core data exchange platform is complete. The next phase focuses on **Python/SQL-heavy data processing**, aligned with real-world data platform needs.
 
 - **Reconciliation + repair tooling** — detect and remediate raw↔canonical gaps from the non-atomic boundary
-- **SQL-backed processing ledger** — track processing attempts/state for exactly-once effects downstream
+- **Ledger-driven repair/requeue workflows** — optional operational tooling on top of the processing ledger
 - **Derived datasets + batch jobs** — Python orchestrated, SQL materialized, idempotent backfills
 - **v2 compatibility hardening** — contract conformance tests, compatibility guarantees, replay safety under schema evolution
 - **Data quality gates** — explicit checks before canonical/derived writes

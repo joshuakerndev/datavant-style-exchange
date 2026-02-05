@@ -60,6 +60,11 @@ This is NOT a toy CRUD app.
 - Parses `occurred_at` into a timezone-aware datetime before inserting `ingested_at`
 - Retries with bounded backoff; on failure publishes to `KAFKA_DLQ_TOPIC_V1`/`KAFKA_DLQ_TOPIC_V2` (fallback `KAFKA_DLQ_TOPIC`)
 - Commits Kafka offsets only after DB success (including dup) or DLQ publish success
+- Writes processing ledger entries to Postgres (`processing_stage_state`, `processing_attempts`)
+  - Attempt starts are committed before processing steps
+  - Success updates are committed with canonical write
+  - Retryable failure updates are committed before sleeping
+  - DLQ publish is terminal; ledger DLQ mark is best-effort but offset commit occurs after DLQ publish to avoid repeated DLQ messages
 
 ### replayer-cli-py
 - Deterministic replay tool
@@ -70,7 +75,7 @@ This is NOT a toy CRUD app.
 
 ### Infrastructure
 - Docker Compose
-- Postgres (idempotency_keys, outbox_events, audit_log tables exist)
+- Postgres (idempotency_keys, outbox_events, audit_log, processing_stage_state, processing_attempts tables exist)
 - MinIO bucket: `raw-objects`
 - Redpanda topics auto-created via `redpanda-init`
 
@@ -103,9 +108,9 @@ This is a deliberate platform boundary; reconciliation is the expected tool to c
 ## Planned Platform Extensions (Intentional, Additive)
 
 - **raw_object_manifest + reconciliation** — track raw objects and reconcile against canonical
-- **processing attempt/state tables** — SQL ledger for idempotent, exactly-once downstream effects
 - **job_runs + job_checkpoints** — Python-driven batch job metadata and restartability
 - **derived datasets** — materialized tables driven by canonical data
+- **reconciliation repair mode** — controlled remediation of raw↔canonical gaps
 
 These are additive evolutions that preserve current contracts and idempotency guarantees.
 

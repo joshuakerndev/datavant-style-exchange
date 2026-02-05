@@ -5,7 +5,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -23,6 +23,9 @@ class TokenizerNon200Error(RuntimeError):
 
 class MissingPatientIdentifiersError(ValueError):
     pass
+
+
+PIPELINE_NAME = "normalizer"
 
 
 def get_env(name: str, default: str | None = None) -> str:
@@ -174,6 +177,294 @@ def mark_manifest_canonicalized(
                 )
 
 
+def start_processing_attempt(
+    conn: psycopg.Connection,
+    *,
+    record_id: str,
+    pipeline: str,
+    correlation_id: Optional[str],
+    event_version: Optional[str],
+    event_id: Optional[str],
+    kafka_topic: str,
+    kafka_partition: int,
+    kafka_offset: int,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH upsert AS (
+                INSERT INTO processing_stage_state (
+                    record_id,
+                    pipeline,
+                    status,
+                    attempt_count,
+                    last_attempt_at,
+                    correlation_id,
+                    event_version,
+                    event_id,
+                    kafka_topic,
+                    kafka_partition,
+                    kafka_offset,
+                    updated_at
+                )
+                VALUES (
+                    %(record_id)s,
+                    %(pipeline)s,
+                    'running',
+                    1,
+                    now(),
+                    %(correlation_id)s,
+                    %(event_version)s,
+                    %(event_id)s,
+                    %(kafka_topic)s,
+                    %(kafka_partition)s,
+                    %(kafka_offset)s,
+                    now()
+                )
+                ON CONFLICT (record_id, pipeline) DO UPDATE
+                SET status = 'running',
+                    attempt_count = processing_stage_state.attempt_count + 1,
+                    last_attempt_at = now(),
+                    correlation_id = EXCLUDED.correlation_id,
+                    event_version = EXCLUDED.event_version,
+                    event_id = EXCLUDED.event_id,
+                    kafka_topic = EXCLUDED.kafka_topic,
+                    kafka_partition = EXCLUDED.kafka_partition,
+                    kafka_offset = EXCLUDED.kafka_offset,
+                    updated_at = now()
+                RETURNING attempt_count
+            )
+            INSERT INTO processing_attempts (
+                record_id,
+                pipeline,
+                attempt_no,
+                status,
+                started_at,
+                correlation_id,
+                event_version,
+                event_id,
+                kafka_topic,
+                kafka_partition,
+                kafka_offset
+            )
+            SELECT
+                %(record_id)s,
+                %(pipeline)s,
+                upsert.attempt_count,
+                'started',
+                now(),
+                %(correlation_id)s,
+                %(event_version)s,
+                %(event_id)s,
+                %(kafka_topic)s,
+                %(kafka_partition)s,
+                %(kafka_offset)s
+            FROM upsert
+            RETURNING attempt_no
+            """,
+            {
+                "record_id": record_id,
+                "pipeline": pipeline,
+                "correlation_id": correlation_id,
+                "event_version": event_version,
+                "event_id": event_id,
+                "kafka_topic": kafka_topic,
+                "kafka_partition": kafka_partition,
+                "kafka_offset": kafka_offset,
+            },
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("failed to record processing attempt")
+        return int(row[0])
+
+
+def mark_processing_success(
+    conn: psycopg.Connection,
+    *,
+    record_id: str,
+    pipeline: str,
+    attempt_no: int,
+    result: str,
+    correlation_id: Optional[str],
+    event_version: Optional[str],
+    event_id: Optional[str],
+    kafka_topic: str,
+    kafka_partition: int,
+    kafka_offset: int,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE processing_attempts
+            SET status = 'succeeded',
+                ended_at = now(),
+                result = %s
+            WHERE record_id = %s AND pipeline = %s AND attempt_no = %s
+            """,
+            (result, record_id, pipeline, attempt_no),
+        )
+        cur.execute(
+            """
+            UPDATE processing_stage_state
+            SET status = 'succeeded',
+                last_success_at = now(),
+                next_retry_at = NULL,
+                last_error_type = NULL,
+                last_error_message = NULL,
+                last_error_stage = NULL,
+                correlation_id = %s,
+                event_version = %s,
+                event_id = %s,
+                kafka_topic = %s,
+                kafka_partition = %s,
+                kafka_offset = %s,
+                updated_at = now()
+            WHERE record_id = %s AND pipeline = %s
+            """,
+            (
+                correlation_id,
+                event_version,
+                event_id,
+                kafka_topic,
+                kafka_partition,
+                kafka_offset,
+                record_id,
+                pipeline,
+            ),
+        )
+
+
+def mark_processing_failure_retryable(
+    conn: psycopg.Connection,
+    *,
+    record_id: str,
+    pipeline: str,
+    attempt_no: int,
+    err_type: str,
+    err_message: str,
+    stage: str,
+    next_retry_at: datetime,
+    correlation_id: Optional[str],
+    event_version: Optional[str],
+    event_id: Optional[str],
+    kafka_topic: str,
+    kafka_partition: int,
+    kafka_offset: int,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE processing_attempts
+            SET status = 'failed',
+                ended_at = now(),
+                transient = true,
+                error_type = %s,
+                error_message = %s,
+                error_stage = %s
+            WHERE record_id = %s AND pipeline = %s AND attempt_no = %s
+            """,
+            (err_type, err_message, stage, record_id, pipeline, attempt_no),
+        )
+        cur.execute(
+            """
+            UPDATE processing_stage_state
+            SET status = 'failed_retryable',
+                next_retry_at = %s,
+                last_error_type = %s,
+                last_error_message = %s,
+                last_error_stage = %s,
+                last_attempt_at = now(),
+                correlation_id = %s,
+                event_version = %s,
+                event_id = %s,
+                kafka_topic = %s,
+                kafka_partition = %s,
+                kafka_offset = %s,
+                updated_at = now()
+            WHERE record_id = %s AND pipeline = %s
+            """,
+            (
+                next_retry_at,
+                err_type,
+                err_message,
+                stage,
+                correlation_id,
+                event_version,
+                event_id,
+                kafka_topic,
+                kafka_partition,
+                kafka_offset,
+                record_id,
+                pipeline,
+            ),
+        )
+
+
+def mark_processing_dlq(
+    conn: psycopg.Connection,
+    *,
+    record_id: str,
+    pipeline: str,
+    attempt_no: int,
+    err_type: str,
+    err_message: str,
+    stage: str,
+    correlation_id: Optional[str],
+    event_version: Optional[str],
+    event_id: Optional[str],
+    kafka_topic: str,
+    kafka_partition: int,
+    kafka_offset: int,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE processing_attempts
+            SET status = 'dlq_published',
+                ended_at = now(),
+                transient = false,
+                error_type = %s,
+                error_message = %s,
+                error_stage = %s
+            WHERE record_id = %s AND pipeline = %s AND attempt_no = %s
+            """,
+            (err_type, err_message, stage, record_id, pipeline, attempt_no),
+        )
+        cur.execute(
+            """
+            UPDATE processing_stage_state
+            SET status = 'dlq',
+                next_retry_at = NULL,
+                last_error_type = %s,
+                last_error_message = %s,
+                last_error_stage = %s,
+                last_attempt_at = now(),
+                correlation_id = %s,
+                event_version = %s,
+                event_id = %s,
+                kafka_topic = %s,
+                kafka_partition = %s,
+                kafka_offset = %s,
+                updated_at = now()
+            WHERE record_id = %s AND pipeline = %s
+            """,
+            (
+                err_type,
+                err_message,
+                stage,
+                correlation_id,
+                event_version,
+                event_id,
+                kafka_topic,
+                kafka_partition,
+                kafka_offset,
+                record_id,
+                pipeline,
+            ),
+        )
+
+
 def publish_dlq(producer: Producer, topic: str, payload: Dict[str, Any]) -> None:
     """Publish DLQ envelope."""
     delivered = Event()
@@ -310,6 +601,7 @@ def main() -> int:
                 event: Dict[str, Any] = {}
                 record_id = None
                 correlation_id = None
+                attempt_no = None
                 stage = "parse_event"
                 try:
                     event = json.loads(msg.value().decode("utf-8"))
@@ -323,11 +615,12 @@ def main() -> int:
                     raw_sha256 = raw_object.get("sha256")
                     raw_bucket = raw_object.get("bucket")
                     raw_size_bytes = raw_object.get("size_bytes")
+                    event_id = event.get("event_id")
 
                     if (
                         event_version not in ("1", "2")
                         or event.get("event_type") != "record.ingested"
-                        or not event.get("event_id")
+                        or not event_id
                         or not ingested_at_raw
                         or not correlation_id
                         or not source
@@ -359,6 +652,34 @@ def main() -> int:
                             correlation_id,
                             raw_bucket,
                         )
+                    stage = "start_attempt"
+                    try:
+                        attempt_no = start_processing_attempt(
+                            db_conn,
+                            record_id=record_id,
+                            pipeline=PIPELINE_NAME,
+                            correlation_id=correlation_id,
+                            event_version=event_version,
+                            event_id=event_id,
+                            kafka_topic=msg.topic(),
+                            kafka_partition=msg.partition(),
+                            kafka_offset=msg.offset(),
+                        )
+                        db_conn.commit()
+                    except psycopg.OperationalError:
+                        db_conn = psycopg.connect(postgres_dsn)
+                        attempt_no = start_processing_attempt(
+                            db_conn,
+                            record_id=record_id,
+                            pipeline=PIPELINE_NAME,
+                            correlation_id=correlation_id,
+                            event_version=event_version,
+                            event_id=event_id,
+                            kafka_topic=msg.topic(),
+                            kafka_partition=msg.partition(),
+                            kafka_offset=msg.offset(),
+                        )
+                        db_conn.commit()
                     stage = "fetch_raw_object"
                     raw = fetch_raw_object(minio_client, raw_bucket, raw_object_key)
                     stage = "normalize"
@@ -390,6 +711,19 @@ def main() -> int:
                                 correlation_id,
                                 type(manifest_exc).__name__,
                             )
+                        mark_processing_success(
+                            db_conn,
+                            record_id=record_id,
+                            pipeline=PIPELINE_NAME,
+                            attempt_no=attempt_no,
+                            result=status,
+                            correlation_id=correlation_id,
+                            event_version=event_version,
+                            event_id=event_id,
+                            kafka_topic=msg.topic(),
+                            kafka_partition=msg.partition(),
+                            kafka_offset=msg.offset(),
+                        )
                         db_conn.commit()
                     except psycopg.OperationalError:
                         db_conn = psycopg.connect(postgres_dsn)
@@ -405,6 +739,19 @@ def main() -> int:
                                 correlation_id,
                                 type(manifest_exc).__name__,
                             )
+                        mark_processing_success(
+                            db_conn,
+                            record_id=record_id,
+                            pipeline=PIPELINE_NAME,
+                            attempt_no=attempt_no,
+                            result=status,
+                            correlation_id=correlation_id,
+                            event_version=event_version,
+                            event_id=event_id,
+                            kafka_topic=msg.topic(),
+                            kafka_partition=msg.partition(),
+                            kafka_offset=msg.offset(),
+                        )
                         db_conn.commit()
 
                     logger.info(
@@ -452,6 +799,50 @@ def main() -> int:
                                     "failed_at": datetime.now(timezone.utc).isoformat(),
                                 },
                             )
+                            if attempt_no is not None:
+                                try:
+                                    try:
+                                        mark_processing_dlq(
+                                            db_conn,
+                                            record_id=record_id,
+                                            pipeline=PIPELINE_NAME,
+                                            attempt_no=attempt_no,
+                                            err_type=err_type,
+                                            err_message=safe_error_message(exc),
+                                            stage=stage,
+                                            correlation_id=correlation_id,
+                                            event_version=event.get("event_version"),
+                                            event_id=event.get("event_id"),
+                                            kafka_topic=msg.topic(),
+                                            kafka_partition=msg.partition(),
+                                            kafka_offset=msg.offset(),
+                                        )
+                                        db_conn.commit()
+                                    except psycopg.OperationalError:
+                                        db_conn = psycopg.connect(postgres_dsn)
+                                        mark_processing_dlq(
+                                            db_conn,
+                                            record_id=record_id,
+                                            pipeline=PIPELINE_NAME,
+                                            attempt_no=attempt_no,
+                                            err_type=err_type,
+                                            err_message=safe_error_message(exc),
+                                            stage=stage,
+                                            correlation_id=correlation_id,
+                                            event_version=event.get("event_version"),
+                                            event_id=event.get("event_id"),
+                                            kafka_topic=msg.topic(),
+                                            kafka_partition=msg.partition(),
+                                            kafka_offset=msg.offset(),
+                                        )
+                                        db_conn.commit()
+                                except Exception as ledger_exc:
+                                    logger.error(
+                                        "ledger_dlq_mark_failed record_id=%s correlation_id=%s error_type=%s",
+                                        record_id,
+                                        correlation_id,
+                                        type(ledger_exc).__name__,
+                                    )
                             consumer.commit(message=msg)
                             break
                         except Exception as dlq_exc:
@@ -466,6 +857,45 @@ def main() -> int:
                         continue
 
                     sleep_ms = backoff_base_ms * (2 ** (attempt - 1))
+                    if attempt_no is not None:
+                        next_retry_at = datetime.now(timezone.utc) + timedelta(milliseconds=sleep_ms)
+                        try:
+                            mark_processing_failure_retryable(
+                                db_conn,
+                                record_id=record_id,
+                                pipeline=PIPELINE_NAME,
+                                attempt_no=attempt_no,
+                                err_type=err_type,
+                                err_message=safe_error_message(exc),
+                                stage=stage,
+                                next_retry_at=next_retry_at,
+                                correlation_id=correlation_id,
+                                event_version=event.get("event_version"),
+                                event_id=event.get("event_id"),
+                                kafka_topic=msg.topic(),
+                                kafka_partition=msg.partition(),
+                                kafka_offset=msg.offset(),
+                            )
+                            db_conn.commit()
+                        except psycopg.OperationalError:
+                            db_conn = psycopg.connect(postgres_dsn)
+                            mark_processing_failure_retryable(
+                                db_conn,
+                                record_id=record_id,
+                                pipeline=PIPELINE_NAME,
+                                attempt_no=attempt_no,
+                                err_type=err_type,
+                                err_message=safe_error_message(exc),
+                                stage=stage,
+                                next_retry_at=next_retry_at,
+                                correlation_id=correlation_id,
+                                event_version=event.get("event_version"),
+                                event_id=event.get("event_id"),
+                                kafka_topic=msg.topic(),
+                                kafka_partition=msg.partition(),
+                                kafka_offset=msg.offset(),
+                            )
+                            db_conn.commit()
                     time.sleep(sleep_ms / 1000.0)
     finally:
         consumer.close()

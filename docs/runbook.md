@@ -122,6 +122,44 @@ Operator checks:
 - Inspect DLQ envelope fields: `original_event`, `error.type`, `error.message`, `error.stage`, `attempts`, `failed_at`
 - Check `normalizer-worker-py` logs for stage and error type
 
+## Processing Ledger (Milestone 2)
+
+The ledger stores attempt history and current state. `error_message` is intentionally sanitized.
+
+Counts by status:
+```sql
+SELECT status, COUNT(*) AS count
+FROM processing_stage_state
+GROUP BY status
+ORDER BY status;
+```
+
+Latest retryable failures:
+```sql
+SELECT record_id, pipeline, last_error_type, last_error_stage, last_attempt_at, next_retry_at
+FROM processing_stage_state
+WHERE status = 'failed_retryable'
+ORDER BY last_attempt_at DESC
+LIMIT 25;
+```
+
+Attempt history for a record_id:
+```sql
+SELECT pipeline, attempt_no, status, started_at, ended_at, result, error_type, error_stage, transient
+FROM processing_attempts
+WHERE record_id = '<record_id>'
+ORDER BY attempt_no DESC;
+```
+
+DLQ'd recently:
+```sql
+SELECT record_id, pipeline, last_error_type, last_error_stage, updated_at
+FROM processing_stage_state
+WHERE status = 'dlq'
+ORDER BY updated_at DESC
+LIMIT 25;
+```
+
 ## Replay vs reconciliation: when to use which
 
 - **Replay (implemented):** deterministic re-emit of raw objects; use for backfills or to rebuild canonical when raw objects exist.

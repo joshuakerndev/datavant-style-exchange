@@ -62,3 +62,53 @@ CREATE INDEX IF NOT EXISTS idx_raw_object_manifest_source_state
 
 CREATE INDEX IF NOT EXISTS idx_raw_object_manifest_state_updated_at
   ON raw_object_manifest (state, updated_at);
+
+CREATE TABLE IF NOT EXISTS processing_stage_state (
+  record_id uuid NOT NULL,
+  pipeline text NOT NULL,
+  status text NOT NULL CHECK (status IN ('running','succeeded','failed_retryable','dlq')),
+  attempt_count integer NOT NULL DEFAULT 0,
+  last_attempt_at timestamptz,
+  last_success_at timestamptz,
+  next_retry_at timestamptz,
+  correlation_id text,
+  event_version text,
+  event_id text,
+  kafka_topic text,
+  kafka_partition integer,
+  kafka_offset bigint,
+  last_error_type text,
+  last_error_message text,
+  last_error_stage text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (record_id, pipeline)
+);
+
+CREATE INDEX IF NOT EXISTS idx_processing_stage_state_status_updated_at
+  ON processing_stage_state (status, updated_at);
+
+CREATE TABLE IF NOT EXISTS processing_attempts (
+  record_id uuid NOT NULL,
+  pipeline text NOT NULL,
+  attempt_no integer NOT NULL,
+  status text NOT NULL CHECK (status IN ('started','succeeded','failed','dlq_published')),
+  started_at timestamptz NOT NULL,
+  ended_at timestamptz,
+  error_type text,
+  error_message text,
+  error_stage text,
+  transient boolean,
+  result text,
+  correlation_id text,
+  event_version text,
+  event_id text,
+  kafka_topic text,
+  kafka_partition integer,
+  kafka_offset bigint,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (record_id, pipeline, attempt_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_processing_attempts_record_pipeline_attempt
+  ON processing_attempts (record_id, pipeline, attempt_no);
